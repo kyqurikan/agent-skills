@@ -17,16 +17,16 @@ startup_timeout_sec = 10
 tool_timeout_sec = 20
 
 [mcp_servers.macwhisper.tools.macwhisper_list_sessions]
-approval_mode = "prompt"
+approval_mode = "approve"
 
 [mcp_servers.macwhisper.tools.macwhisper_search_sessions]
-approval_mode = "prompt"
+approval_mode = "approve"
 
 [mcp_servers.macwhisper.tools.macwhisper_status]
 approval_mode = "approve"
 
 [mcp_servers.macwhisper.tools.macwhisper_get_transcript]
-approval_mode = "prompt"
+approval_mode = "approve"
 
 [mcp_servers.macwhisper.tools.macwhisper_mark_processed]
 approval_mode = "prompt"

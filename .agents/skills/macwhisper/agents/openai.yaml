@@ -1,7 +1,7 @@
 interface:
   display_name: "MacWhisper MCP"
   short_description: "Safely work with local MacWhisper transcripts"
-  default_prompt: "Use $macwhisper to list recent MacWhisper sessions and retrieve only the meeting I approve."
+  default_prompt: "Use $macwhisper to list recent MacWhisper sessions and summarize only a meeting I explicitly select."
 
 dependencies:
   tools:
