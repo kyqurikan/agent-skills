@@ -1,0 +1,11 @@
+interface:
+  display_name: "MacWhisper MCP"
+  short_description: "Safely work with local MacWhisper transcripts"
+  default_prompt: "Use $macwhisper to list recent MacWhisper sessions and retrieve only the meeting I approve."
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "macwhisper"
+      description: "Project-scoped local MacWhisper MCP server"
+      transport: "stdio"
