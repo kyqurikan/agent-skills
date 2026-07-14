@@ -22,7 +22,7 @@ from urllib.parse import quote
 
 
 SERVER_NAME = "macwhisper-mcp"
-SERVER_VERSION = "1.0.0"
+SERVER_VERSION = "1.0.1"
 SUPPORTED_PROTOCOLS = (
     "2025-11-25",
     "2025-06-18",
@@ -527,9 +527,17 @@ def _load_state() -> dict:
 
 
 def _open_state_lock(directory_fd: int) -> int:
-    flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    common_flags = os.O_RDWR | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
     try:
-        lock_fd = os.open(STATE_LOCK_FILE, flags, 0o600, dir_fd=directory_fd)
+        try:
+            lock_fd = os.open(
+                STATE_LOCK_FILE,
+                common_flags | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=directory_fd,
+            )
+        except FileExistsError:
+            lock_fd = os.open(STATE_LOCK_FILE, common_flags, dir_fd=directory_fd)
     except OSError as exc:
         raise ToolFailure("STATE_PATH_UNSAFE", "The state lock could not be opened safely.") from exc
     info = os.fstat(lock_fd)
@@ -1252,7 +1260,10 @@ class McpServer:
             return _error(request_id, -32002, "Server not initialized")
 
         if method == "tools/list":
-            if not isinstance(params, dict) or any(key != "cursor" for key in params):
+            if not isinstance(params, dict) or set(params) - {"cursor", "_meta"}:
+                return _error(request_id, -32602, "Invalid tools/list parameters")
+            request_meta = params.get("_meta")
+            if request_meta is not None and not isinstance(request_meta, dict):
                 return _error(request_id, -32602, "Invalid tools/list parameters")
             cursor = params.get("cursor")
             if cursor is not None:
