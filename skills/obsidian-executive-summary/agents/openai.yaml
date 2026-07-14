@@ -1,0 +1,4 @@
+interface:
+  display_name: "Obsidian Executive Summary"
+  short_description: "Summarize Obsidian meeting transcripts locally"
+  default_prompt: "Use $obsidian-executive-summary to generate a preview executive summary for a selected sales transcript note."

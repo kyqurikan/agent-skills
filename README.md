@@ -24,6 +24,10 @@ Unified expert for Project Management (Scrum/Agile) and GitHub Flow enforcement.
 Read-only access to [MacWhisper](https://goodsnooze.gumroad.com/l/macwhisper) transcription sessions from its local SQLite database. Zero configuration for a standard MacWhisper install.
 - **Key Features:** List unprocessed recordings, fetch diarized transcripts with hallucination filtering, keyword search, processed-session state tracking, and UTC time windows for calendar enrichment.
 
+### 📝 [Obsidian Executive Summary](./skills/obsidian-executive-summary)
+Generate a structured four-section sales note from an approved Obsidian transcription using a fixed local OpenAI-compatible model endpoint.
+- **Key Features:** Preview-first operation, configurable path allowlists, atomic writes, exact transcript preservation, deterministic supporting sections, strict credential permissions, untrusted-transcript handling, and synthetic tests.
+
 ## Usage
 
 These skills are designed to be dropped into your agent's skills directory.
