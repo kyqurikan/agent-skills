@@ -234,7 +234,14 @@ class MacWhisperServerTests(unittest.TestCase):
         self.assertEqual(future["result"]["protocolVersion"], "2025-11-25")
         self.assertIn("untrusted data", future["result"]["instructions"])
         instance.handle({"jsonrpc": "2.0", "method": "notifications/initialized"})
-        catalog = instance.handle({"jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {}})
+        catalog = instance.handle(
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/list",
+                "params": {"_meta": {"progressToken": 0}},
+            }
+        )
         tools = catalog["result"]["tools"]
         self.assertEqual(len(tools), len({item["name"] for item in tools}))
         for tool in tools:
@@ -523,11 +530,14 @@ class MacWhisperServerTests(unittest.TestCase):
             for session_id in session_ids
         ]
         results = []
+        failures = []
         for process in processes:
             stdout, stderr = process.communicate(timeout=15)
-            self.assertEqual(process.returncode, 0, stderr)
-            self.assertEqual(stderr, "")
-            results.append(json.loads(stdout))
+            if process.returncode != 0 or stderr:
+                failures.append((process.returncode, stderr))
+            else:
+                results.append(json.loads(stdout))
+        self.assertFalse(failures, failures[0] if failures else None)
         self.assertTrue(all(not result["already_processed"] for result in results))
         state_file = self.home / "Library" / "Application Support" / "MacWhisper MCP" / "state.json"
         state_value = json.loads(state_file.read_text(encoding="utf-8"))

@@ -14,5 +14,5 @@ All session-data access and state writes require approval; count-only status is 
 
 - Fork: `https://github.com/kyqurikan/agent-skills`
 - Branch: `codex/harden-macwhisper-mcp`
-- Pinned commit: `0a63a5ca741a1fe805e89a72214382cfbf9d9090`
+- Pinned commit: `3f988d37f5ab19bf35fc49936f2530c30ea7f432`
 - Skill path: `skills/macwhisper`
