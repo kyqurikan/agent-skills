@@ -18,15 +18,24 @@
   file changes during generation.
 - Writes use a same-directory temporary file, preserve the original mode, call
   `fsync`, and replace atomically.
-- Existing transcription and supporting-section bytes are checked before a
-  write. Raw single-line transcript bytes remain the final file tail.
+- Existing supporting-section bytes and the exact transcription payload are
+  checked before a write. The script adds or normalizes one locally controlled
+  triple-backtick Transcription wrapper and preserves an existing canonical
+  wrapper byte-for-byte.
+- A transcription containing a standalone CommonMark backtick-closing line is
+  rejected before credential loading, model access, or writing because the
+  required exact triple-backtick wrapper cannot contain it without changing
+  source bytes.
 
 ## Model-output boundary
 
 The model controls only the body of `## Executive Summary`. The script rejects
-empty or oversized responses and output containing Markdown headings, fenced
-blocks, Markdown or Obsidian links/embeds, HTML, template embeds, or remote
-URLs. The H2 skeleton and supporting placeholders are deterministic assets.
+empty or oversized responses and output containing Markdown or Obsidian
+links/embeds, HTML, template embeds, or remote URLs. Model-supplied backtick
+fence lines are removed, remaining triple-backtick runs are neutralized, and
+the complete cleaned response is wrapped exactly once by the local template.
+Returned headings remain inert literal content inside that wrapper. The H2
+skeleton and supporting placeholders are deterministic assets.
 
 ## Repository boundary
 

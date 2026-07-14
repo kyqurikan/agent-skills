@@ -59,8 +59,12 @@ class ExecutiveSummaryTests(unittest.TestCase):
         self.assertTrue(module.is_raw_single_line_note(raw))
         self.assertEqual(module.extract_transcription(raw), raw)
         normalized = module.add_transcription_heading(raw)
-        self.assertEqual(normalized, f"## Transcription\n\n{raw}")
-        self.assertTrue(normalized.endswith(raw))
+        self.assertEqual(
+            normalized,
+            f"## Transcription\n```\n{raw}\n```",
+        )
+        self.assertIn(raw, normalized)
+        self.assertTrue(module.transcription_is_canonically_fenced(normalized))
         self.assertEqual(module.extract_transcription(normalized), raw.strip())
 
         multiline = "Speaker 1: First line.\nSpeaker 2: Second line."
@@ -119,7 +123,10 @@ class ExecutiveSummaryTests(unittest.TestCase):
                 updated,
             )
             self.assertIn("Pull Invitees from calendar invite here.", updated)
-            self.assertTrue(updated.endswith(f"## Transcription\n\n{raw}"))
+            self.assertTrue(
+                updated.endswith(module.render_transcription_section(raw, "\n"))
+            )
+            self.assertTrue(module.transcription_is_canonically_fenced(updated))
             self.assertEqual(module.extract_transcription(updated), raw.strip())
 
     def test_clean_model_content_normalizes_bold_category_numbers(self):
@@ -135,17 +142,45 @@ class ExecutiveSummaryTests(unittest.TestCase):
         self.assertIn("2. **Technical Considerations:**", cleaned)
         self.assertNotIn("**1. **", cleaned)
 
-    def test_clean_model_content_rejects_active_markdown_and_headings(self):
+    def test_clean_model_content_removes_model_fences_and_keeps_h2_literal(self):
+        model_content = (
+            "```markdown\n"
+            "## Executive Summary\n"
+            "Opening.\n\n"
+            "1. **Decision:**\n"
+            "   - Proceed.\n"
+            "```\n\n"
+            "````json\n"
+            '{"owner": "not specified"}\n'
+            "````\n\n"
+            "Closing with an inline ``` delimiter."
+        )
+        cleaned = module._clean_model_content(model_content)
+        self.assertIn("## Executive Summary", cleaned)
+        self.assertIn('{"owner": "not specified"}', cleaned)
+        self.assertIn("inline `` delimiter", cleaned)
+        self.assertNotIn("```", cleaned)
+
+        rendered = module.render_section(cleaned, "7-14-26", "\n")
+        self.assertEqual(rendered.splitlines().count("```"), 2)
+        self.assertEqual(
+            [heading.title for heading in module._structural_h2_headings(rendered)],
+            ["Executive Summary"],
+        )
+        self.assertIn("\n```\n", rendered)
+        self.assertTrue(rendered.endswith("\n```"))
+
+    def test_render_section_rejects_unowned_triple_backtick(self):
+        with self.assertRaises(module.SummaryError):
+            module.render_section("Unsafe ``` delimiter.", "7-14-26", "\n")
+
+    def test_clean_model_content_rejects_active_markdown(self):
         unsafe_values = (
-            "# Model-controlled heading",
-            "### Model-controlled heading",
             "[External link](https://example.invalid)",
             "![[embedded-note]]",
             "<iframe src='https://example.invalid'></iframe>",
             "{{template-embed}}",
             "Remote resource: https://example.invalid/data",
-            "```markdown\ncontent\n```",
-            "~~~\ncode\n~~~",
         )
         for unsafe in unsafe_values:
             with self.subTest(unsafe=unsafe):
@@ -225,9 +260,9 @@ class ExecutiveSummaryTests(unittest.TestCase):
             "Speaker 2: مرحبا 日本語.\n"
         )
         transcription = module.extract_transcription(text)
-        transcription_bounds = module._section_bounds(text, "Transcription")
-        transcription_heading, _, transcription_end = transcription_bounds
-        transcription_block = text[transcription_heading.start() : transcription_end]
+        original_payload, canonical, raw = module._transcription_state(text)
+        self.assertFalse(canonical)
+        self.assertFalse(raw)
         rendered = module.render_section(
             "Opening.\n\n1. **Action:**\n   - Validate.",
             "8-22-25",
@@ -236,15 +271,48 @@ class ExecutiveSummaryTests(unittest.TestCase):
         updated = module.apply_template_sections(text, rendered)
         self.assertLess(updated.index("## Executive Summary"), updated.index("## Transcription"))
         self.assertEqual(module.extract_transcription(updated), transcription)
+        self.assertTrue(module.transcription_is_canonically_fenced(updated))
         updated_bounds = module._section_bounds(updated, "Transcription")
         updated_heading, _, updated_end = updated_bounds
-        self.assertEqual(
-            updated[updated_heading.start() : updated_end],
-            transcription_block,
+        self.assertTrue(
+            updated[updated_heading.start() : updated_end].startswith(
+                module.render_transcription_section(original_payload, "\n")
+            )
         )
         self.assertIn("**Executive Summary: 8-22-25**", updated)
         self.assertIn("## Meeting Invitees", updated)
         self.assertIn("## Relevant Emails and Notes\nNone.", updated)
+
+    def test_structured_unfenced_write_wraps_exact_payload(self):
+        original_payload = "Speaker 1: First.  \nSpeaker 2: Second.\t"
+        text = (
+            "## Executive Summary\n```\n```\n\n"
+            f"## Transcription\n{original_payload}"
+        )
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            root = Path(temporary) / "Allowed Root"
+            note = root / "2026-07-14-structured.md"
+            note.parent.mkdir(parents=True)
+            note.write_text(text, encoding="utf-8")
+
+            with mock.patch.object(module, "ALLOWED_ROOTS", (root,)):
+                with mock.patch.object(module, "load_api_key", return_value="test-secret"):
+                    with mock.patch.object(
+                        module,
+                        "request_summary",
+                        return_value="Opening.\n\n1. **Decision:**\n   - Proceed.",
+                    ):
+                        output = io.StringIO()
+                        errors = io.StringIO()
+                        with redirect_stdout(output), redirect_stderr(errors):
+                            self.assertEqual(module.main([str(note), "--write"]), 0)
+                        self.assertEqual(output.getvalue(), "")
+
+            updated = note.read_text(encoding="utf-8")
+            expected = module.render_transcription_section(original_payload, "\n")
+            self.assertTrue(updated.endswith(expected))
+            self.assertIn(original_payload, updated)
+            self.assertTrue(module.transcription_is_canonically_fenced(updated))
 
     def test_existing_summary_requires_replace_and_can_be_replaced(self):
         text = (
@@ -261,6 +329,7 @@ class ExecutiveSummaryTests(unittest.TestCase):
         updated = module.apply_template_sections(text, rendered)
         self.assertNotIn("Existing summary.", updated)
         self.assertEqual(module.extract_transcription(updated), "Transcript body.")
+        self.assertTrue(module.transcription_is_canonically_fenced(updated))
         self.assertEqual(
             [heading.title for heading in module._structural_h2_headings(updated)],
             list(module.CANONICAL_SECTION_TITLES),
@@ -300,6 +369,15 @@ class ExecutiveSummaryTests(unittest.TestCase):
             list(module.CANONICAL_SECTION_TITLES),
         )
         self.assertEqual(module.extract_transcription(updated), transcription)
+        self.assertTrue(module.transcription_is_canonically_fenced(updated))
+        transcription_bounds = module._section_bounds(updated, "Transcription")
+        transcription_heading, _, transcription_end = transcription_bounds
+        transcription_section = updated[
+            transcription_heading.start() : transcription_end
+        ]
+        self.assertIn("## Not a structural heading", transcription_section)
+        self.assertNotIn("````", transcription_section)
+        self.assertEqual(transcription_section.splitlines().count("```"), 2)
         email_bounds = module._section_bounds(updated, "Relevant Emails and Notes")
         invitee_bounds = module._section_bounds(updated, "Meeting Invitees")
         email_heading, _, email_end = email_bounds
@@ -369,6 +447,52 @@ class ExecutiveSummaryTests(unittest.TestCase):
         updated = module.apply_template_sections(text, rendered)
         self.assertNotIn("\n", updated.replace("\r\n", ""))
         self.assertEqual(module.extract_transcription(updated), "Speaker 1: Body.")
+        self.assertIn(
+            "## Transcription\r\n```\r\nSpeaker 1: Body.\r\n```",
+            updated,
+        )
+
+    def test_canonical_transcription_wrapper_is_idempotent(self):
+        transcription_section = (
+            "## Transcription\n"
+            "```\n"
+            "Speaker 1: Preserve this.\n"
+            "## Literal transcript heading\n"
+            "```\n"
+        )
+        text = (
+            "## Executive Summary\nPending generation.\n\n"
+            "## Relevant Emails and Notes\nKeep.\n\n"
+            "## Meeting Invitees\nKeep.\n\n"
+            f"{transcription_section}"
+        )
+        rendered = module.render_section("Replacement.", "7-14-26", "\n")
+        updated = module.apply_template_sections(text, rendered)
+        bounds = module._section_bounds(updated, "Transcription")
+        heading, _, section_end = bounds
+        self.assertEqual(
+            updated[heading.start() : section_end],
+            transcription_section,
+        )
+        self.assertEqual(
+            [heading.title for heading in module._structural_h2_headings(updated)],
+            list(module.CANONICAL_SECTION_TITLES),
+        )
+
+    def test_transcription_wrapper_rejects_closing_fence_line(self):
+        unsafe_payloads = (
+            "Speaker 1.\n```\nSpeaker 2.",
+            "Speaker 1.\n  ````  \nSpeaker 2.",
+        )
+        for payload in unsafe_payloads:
+            with self.subTest(payload=payload):
+                with self.assertRaises(module.SummaryError):
+                    module.render_transcription_section(payload, "\n")
+
+        safe_payload = "Inline ``` text.\n    ```\n~~~"
+        rendered = module.render_transcription_section(safe_payload, "\n")
+        self.assertIn(safe_payload, rendered)
+        self.assertTrue(module.transcription_is_canonically_fenced(rendered))
 
     def test_local_chat_request_uses_fixed_model_prompt_and_untrusted_marker(self):
         server = ThreadingHTTPServer(("127.0.0.1", 0), MockHandler)

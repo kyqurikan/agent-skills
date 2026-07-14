@@ -26,7 +26,7 @@ Read-only access to [MacWhisper](https://goodsnooze.gumroad.com/l/macwhisper) tr
 
 ### 📝 [Obsidian Executive Summary](./skills/obsidian-executive-summary)
 Generate a structured four-section sales note from an approved Obsidian transcription using a fixed local OpenAI-compatible model endpoint.
-- **Key Features:** Preview-first operation, configurable path allowlists, atomic writes, exact transcript preservation, deterministic supporting sections, strict credential permissions, untrusted-transcript handling, and synthetic tests.
+- **Key Features:** Preview-first operation, configurable path allowlists, atomic writes, exact transcript preservation inside a deterministic fence, normalized model delimiters, deterministic supporting sections, strict credential permissions, untrusted-transcript handling, and synthetic tests.
 
 ## Usage
 
