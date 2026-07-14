@@ -1,0 +1,32 @@
+[mcp_servers.macwhisper]
+command = "/usr/bin/python3"
+args = ["-I", "-B", "-u", "/Users/thespecialone/Documents/MacWhisper - MCP/.agents/skills/macwhisper/server.py"]
+cwd = "/Users/thespecialone/Documents/MacWhisper - MCP"
+env = { HOME = "/Users/thespecialone", MACWHISPER_DB_PATH = "/Users/thespecialone/Library/Application Support/MacWhisper/Database/main.sqlite" }
+enabled = true
+required = true
+enabled_tools = [
+  "macwhisper_list_sessions",
+  "macwhisper_get_transcript",
+  "macwhisper_search_sessions",
+  "macwhisper_status",
+  "macwhisper_mark_processed",
+]
+default_tools_approval_mode = "prompt"
+startup_timeout_sec = 10
+tool_timeout_sec = 20
+
+[mcp_servers.macwhisper.tools.macwhisper_list_sessions]
+approval_mode = "prompt"
+
+[mcp_servers.macwhisper.tools.macwhisper_search_sessions]
+approval_mode = "prompt"
+
+[mcp_servers.macwhisper.tools.macwhisper_status]
+approval_mode = "approve"
+
+[mcp_servers.macwhisper.tools.macwhisper_get_transcript]
+approval_mode = "prompt"
+
+[mcp_servers.macwhisper.tools.macwhisper_mark_processed]
+approval_mode = "prompt"
