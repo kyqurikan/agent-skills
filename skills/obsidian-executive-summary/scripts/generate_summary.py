@@ -264,20 +264,291 @@ def _section_bounds(text: str, title: str) -> tuple[Heading, int, int] | None:
     return heading, body_start, section_end
 
 
-def is_raw_single_line_note(text: str) -> bool:
-    return (
-        not ANY_MARKDOWN_HEADING_PATTERN.search(text)
-        and len(text.splitlines()) == 1
-        and bool(text.strip())
-    )
-
-
 def _line_without_ending(line: str) -> str:
     if line.endswith("\n"):
         line = line[:-1]
     if line.endswith("\r"):
         line = line[:-1]
     return line
+
+
+def _strip_yaml_comment(value: str) -> str | None:
+    """Remove a trailing YAML comment while respecting quoted scalars."""
+    quote: str | None = None
+    item_start = True
+    index = 0
+    while index < len(value):
+        character = value[index]
+        if quote == "'":
+            if character == "'" and index + 1 < len(value) and value[index + 1] == "'":
+                index += 2
+                continue
+            if character == "'":
+                quote = None
+        elif quote == '"':
+            if character == "\\":
+                index += 2
+                continue
+            if character == '"':
+                quote = None
+        elif character in ("'", '"') and item_start:
+            quote = character
+        elif character == "#" and (index == 0 or value[index - 1].isspace()):
+            return value[:index].rstrip()
+        elif character == ",":
+            item_start = True
+        elif character == "[" and item_start:
+            item_start = True
+        elif not character.isspace():
+            item_start = False
+        index += 1
+    if quote is not None:
+        return None
+    return value.strip()
+
+
+def _yaml_single_quoted_is_safe(value: str) -> bool:
+    if len(value) < 2 or value[0] != "'" or value[-1] != "'":
+        return False
+    index = 1
+    while index < len(value) - 1:
+        character = value[index]
+        if character == "'":
+            if index + 1 >= len(value) - 1 or value[index + 1] != "'":
+                return False
+            index += 2
+            continue
+        if ord(character) < 0x20:
+            return False
+        index += 1
+    return True
+
+
+def _yaml_double_quoted_is_safe(value: str) -> bool:
+    if len(value) < 2 or value[0] != '"' or value[-1] != '"':
+        return False
+    escape_lengths = {"x": 2, "u": 4, "U": 8}
+    simple_escapes = set('0abtnvfre"\\/')
+    index = 1
+    while index < len(value) - 1:
+        character = value[index]
+        if character == '"':
+            return False
+        if character == "\\":
+            index += 1
+            if index >= len(value) - 1:
+                return False
+            escape = value[index]
+            if escape in simple_escapes:
+                index += 1
+                continue
+            digits = escape_lengths.get(escape)
+            if digits is None:
+                return False
+            encoded = value[index + 1 : index + 1 + digits]
+            if len(encoded) != digits or any(
+                character not in "0123456789abcdefABCDEF" for character in encoded
+            ):
+                return False
+            codepoint = int(encoded, 16)
+            if escape in ("u", "U") and (
+                codepoint > 0x10FFFF or 0xD800 <= codepoint <= 0xDFFF
+            ):
+                return False
+            index += digits + 1
+            continue
+        if ord(character) < 0x20:
+            return False
+        index += 1
+    return True
+
+
+def _yaml_plain_scalar_is_safe(value: str) -> bool:
+    if not value or "\t" in value or any(ord(character) < 0x20 for character in value):
+        return False
+    if value[0] in "-?:,[]{}#&*!|>'\"%@" or value[0] == chr(96):
+        return False
+    if any(character in value for character in "[]{}"):
+        return False
+    if re.search(r":(?:\s|$)", value):
+        return False
+    return True
+
+
+def _yaml_flow_sequence_is_safe(value: str) -> bool:
+    if len(value) < 2 or value[0] != "[" or value[-1] != "]":
+        return False
+    inner = value[1:-1].strip()
+    if not inner:
+        return True
+
+    items: list[str] = []
+    quote: str | None = None
+    item_has_content = False
+    start = 0
+    index = 0
+    while index < len(inner):
+        character = inner[index]
+        if quote == "'":
+            if character == "'" and index + 1 < len(inner) and inner[index + 1] == "'":
+                index += 2
+                continue
+            if character == "'":
+                quote = None
+        elif quote == '"':
+            if character == "\\":
+                index += 2
+                continue
+            if character == '"':
+                quote = None
+        elif character in ("'", '"') and not item_has_content:
+            quote = character
+            item_has_content = True
+        elif character in "[]{}#":
+            return False
+        elif character == ",":
+            item = inner[start:index].strip()
+            if not item:
+                return False
+            items.append(item)
+            start = index + 1
+            item_has_content = False
+        elif not character.isspace():
+            item_has_content = True
+        index += 1
+    if quote is not None:
+        return False
+    final_item = inner[start:].strip()
+    if not final_item:
+        return False
+    items.append(final_item)
+    return all(_yaml_scalar_is_safe(item, allow_flow=False) for item in items)
+
+
+def _yaml_scalar_is_safe(value: str, *, allow_flow: bool) -> bool:
+    cleaned = _strip_yaml_comment(value)
+    if cleaned is None or not cleaned:
+        return False
+    if cleaned.startswith("["):
+        return allow_flow and _yaml_flow_sequence_is_safe(cleaned)
+    if cleaned.startswith("{"):
+        return False
+    if cleaned.startswith("'"):
+        return _yaml_single_quoted_is_safe(cleaned)
+    if cleaned.startswith('"'):
+        return _yaml_double_quoted_is_safe(cleaned)
+    return _yaml_plain_scalar_is_safe(cleaned)
+
+
+def _frontmatter_is_safe_mapping(lines: list[str]) -> bool:
+    """Validate the conservative Obsidian-properties subset used for raw notes."""
+    keys: set[str] = set()
+    active_sequence = False
+    sequence_indentation: int | None = None
+    for raw_line in lines:
+        line = _line_without_ending(raw_line)
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if "\t" in line:
+            return False
+        leading = line[: len(line) - len(line.lstrip(" "))]
+        stripped = line[len(leading) :]
+        if leading:
+            if (
+                not active_sequence
+                or len(leading) < 2
+                or not stripped.startswith("- ")
+            ):
+                return False
+            if sequence_indentation is None:
+                sequence_indentation = len(leading)
+            elif len(leading) != sequence_indentation:
+                return False
+            item = stripped[1:].strip()
+            if not item or not _yaml_scalar_is_safe(item, allow_flow=False):
+                return False
+            continue
+
+        separator = next(
+            (
+                index
+                for index, character in enumerate(stripped)
+                if character == ":"
+                and (index + 1 == len(stripped) or stripped[index + 1].isspace())
+            ),
+            None,
+        )
+        if separator is None:
+            return False
+        key, value = stripped[:separator], stripped[separator + 1 :]
+        key = key.strip()
+        folded_key = key.casefold()
+        if (
+            not key
+            or key[0] in "-?:"
+            or "#" in key
+            or any(character in key for character in "{}[],&*!|>'\"%@`")
+            or folded_key in keys
+            or folded_key == "<<"
+        ):
+            return False
+        keys.add(folded_key)
+        value = value.strip()
+        active_sequence = not value
+        sequence_indentation = None
+        if value:
+            if value[0] in "&*!" or value in ("|", ">", "|-", ">-", "|+", ">+"):
+                return False
+            if not _yaml_scalar_is_safe(value, allow_flow=True):
+                return False
+    return bool(keys)
+
+
+def _raw_single_line_parts(text: str) -> tuple[str, str, str] | None:
+    """Return preserved prefix, exact transcript line, and blank suffix."""
+    lines = text.splitlines(keepends=True)
+    if lines and _line_without_ending(lines[0]) == "---":
+        closing = next(
+            (
+                index
+                for index, line in enumerate(lines[1:], 1)
+                if _line_without_ending(line) in ("---", "...")
+            ),
+            None,
+        )
+        if closing is None:
+            return None
+        if not _frontmatter_is_safe_mapping(lines[1:closing]):
+            return None
+        post_frontmatter = lines[closing + 1 :]
+        nonblank = [
+            index
+            for index, line in enumerate(post_frontmatter)
+            if _line_without_ending(line).strip()
+        ]
+        if len(nonblank) != 1:
+            return None
+        transcript_index = nonblank[0]
+        payload = post_frontmatter[transcript_index]
+        if ANY_MARKDOWN_HEADING_PATTERN.search(_line_without_ending(payload)):
+            return None
+        prefix = "".join(lines[: closing + 1] + post_frontmatter[:transcript_index])
+        suffix = "".join(post_frontmatter[transcript_index + 1 :])
+        if not prefix.endswith(("\n", "\r")):
+            return None
+        return prefix, payload, suffix
+
+    if (
+        not ANY_MARKDOWN_HEADING_PATTERN.search(text)
+        and len(text.splitlines()) == 1
+        and bool(text.strip())
+    ):
+        return "", text, ""
+    return None
+
+
+def is_raw_single_line_note(text: str) -> bool:
+    return _raw_single_line_parts(text) is not None
 
 
 def _outer_transcription_fence(body: str) -> tuple[str, bool] | None:
@@ -312,7 +583,6 @@ def _outer_transcription_fence(body: str) -> tuple[str, bool] | None:
     payload = "".join(lines[first + 1 : last])
     canonical = (
         first == 0
-        and last == len(lines) - 1
         and opening_line == "```"
         and closing_line == "```"
     )
@@ -323,12 +593,21 @@ def _transcription_state(text: str) -> tuple[str, bool, bool]:
     """Return exact payload, canonical-wrapper state, and raw-note state."""
     bounds = _section_bounds(text, "Transcription")
     if bounds is None:
-        if not is_raw_single_line_note(text):
+        raw_parts = _raw_single_line_parts(text)
+        if raw_parts is None:
+            lines = text.splitlines(keepends=True)
+            if lines and _line_without_ending(lines[0]) == "---":
+                raise SummaryError(
+                    "The note has no ## Transcription section. YAML-frontmatter notes "
+                    "must have a closed frontmatter block followed by exactly one "
+                    "non-empty transcript line and no Markdown heading."
+                )
             raise SummaryError(
                 "The note does not contain a ## Transcription section and is not a "
                 "heading-free single-line transcript."
             )
-        return text, False, True
+        _, payload, _ = raw_parts
+        return payload, False, True
 
     _, body_start, section_end = bounds
     body = text[body_start:section_end]
@@ -407,10 +686,37 @@ def render_transcription_section(payload: str, newline: str) -> str:
     return rendered + "```"
 
 
+def _expected_fenced_transcription_payload(payload: str, newline: str) -> str:
+    """Allow only the synthetic newline needed before the closing fence."""
+    if payload.endswith(("\n", "\r")):
+        return payload
+    return payload + newline
+
+
+def transcription_payload_is_preserved(
+    text: str,
+    original_payload: str,
+    newline: str,
+) -> bool:
+    try:
+        payload, canonical, raw_single_line = _transcription_state(text)
+    except SummaryError:
+        return False
+    return (
+        canonical
+        and not raw_single_line
+        and payload == _expected_fenced_transcription_payload(original_payload, newline)
+    )
+
+
 def add_transcription_heading(text: str) -> str:
-    if not is_raw_single_line_note(text):
-        raise SummaryError("Only a heading-free single-line note can be normalized automatically.")
-    return render_transcription_section(text, _newline_for(text))
+    raw_parts = _raw_single_line_parts(text)
+    if raw_parts is None:
+        raise SummaryError(
+            "Only a heading-free single-line note can be normalized automatically."
+        )
+    prefix, payload, suffix = raw_parts
+    return prefix + render_transcription_section(payload, _newline_for(text)) + suffix
 
 
 def transcription_is_canonically_fenced(text: str) -> bool:
@@ -839,7 +1145,10 @@ def main(argv: list[str] | None = None) -> int:
             raise SummaryError("--replace-existing requires --write.")
         path = resolve_note(args.note)
         original, text, original_mode = read_note(path)
-        raw_single_line = is_raw_single_line_note(text)
+        raw_parts = _raw_single_line_parts(text)
+        raw_single_line = raw_parts is not None
+        raw_frontmatter_prefix = raw_parts[0] if raw_parts is not None else ""
+        raw_trailing_padding = raw_parts[2] if raw_parts is not None else ""
         original_transcription_payload, original_fence_canonical, _ = _transcription_state(text)
         transcription = extract_transcription(text)
         current_summary = existing_summary_body(text)
@@ -871,6 +1180,8 @@ def main(argv: list[str] | None = None) -> int:
         api_key = load_api_key()
         summary = request_summary(transcription, api_key)
         rendered = render_section(summary, meeting_date(path), _newline_for(text))
+        if not args.write:
+            print(rendered)
         if args.write:
             if hashlib.sha256(path.read_bytes()).digest() != hashlib.sha256(original).digest():
                 raise SummaryError("The note changed while the summary was generated; no write occurred.")
@@ -894,36 +1205,53 @@ def main(argv: list[str] | None = None) -> int:
                     "The generated edit would leave Transcription without the required "
                     "triple-backtick wrapper; no write occurred."
                 )
+            if not transcription_payload_is_preserved(
+                updated,
+                original_transcription_payload,
+                _newline_for(text),
+            ):
+                raise SummaryError(
+                    "The generated edit would alter the transcription beyond the "
+                    "permitted synthetic closing-fence newline; no write occurred."
+                )
+            if raw_frontmatter_prefix and not updated.startswith(raw_frontmatter_prefix):
+                raise SummaryError(
+                    "The generated edit would alter YAML frontmatter; no write occurred."
+                )
+            if raw_single_line:
+                expected_raw_section = render_transcription_section(
+                    original_transcription_payload,
+                    _newline_for(text),
+                ) + raw_trailing_padding
+                if updated_transcription_section != expected_raw_section:
+                    raise SummaryError(
+                        "The generated edit would alter raw-note spacing outside the "
+                        "Transcription wrapper; no write occurred."
+                    )
             if original_fence_canonical:
                 if updated_transcription_section != preserved_transcription_section:
                     raise SummaryError(
                         "The generated edit would alter the Transcription section; "
                         "no write occurred."
                     )
-            else:
-                expected_section = render_transcription_section(
-                    original_transcription_payload,
-                    _newline_for(text),
-                )
-                if (
-                    not updated_transcription_section.startswith(expected_section)
-                    or updated_transcription_section[len(expected_section) :].strip()
-                ):
-                    raise SummaryError(
-                        "The generated edit would alter the transcription payload while "
-                        "adding its wrapper; no write occurred."
-                    )
             atomic_write(path, updated, original_mode)
             print(f"Updated: {path}", file=sys.stderr)
         else:
-            print(rendered)
             if raw_single_line:
-                print(
-                    "Detected a heading-free single-line transcript; --write will add "
-                    "## Transcription and one exact triple-backtick wrapper without "
-                    "changing the original line.",
-                    file=sys.stderr,
-                )
+                if raw_frontmatter_prefix:
+                    print(
+                        "Detected YAML frontmatter followed by one transcript line; "
+                        "--write will preserve the frontmatter and add ## Transcription "
+                        "with one exact triple-backtick wrapper.",
+                        file=sys.stderr,
+                    )
+                else:
+                    print(
+                        "Detected a heading-free single-line transcript; --write will add "
+                        "## Transcription and one exact triple-backtick wrapper without "
+                        "changing the original line.",
+                        file=sys.stderr,
+                    )
             elif not original_fence_canonical:
                 print(
                     "--write will enclose ## Transcription in one exact triple-backtick "

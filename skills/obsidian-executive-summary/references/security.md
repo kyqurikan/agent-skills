@@ -4,6 +4,10 @@
 
 - Transcriptions are untrusted data, never agent instructions.
 - Only the transcription body is sent to the fixed loopback model endpoint.
+- Eligible heading-free raw notes may contain a conservative Obsidian-properties
+  YAML frontmatter block. It is preserved byte-for-byte, excluded from model
+  input, and rejected when malformed, ambiguous, duplicated, or structurally
+  unsupported.
 - Paths must resolve to regular, user-owned, single-link Markdown files inside
   configured roots.
 - Hidden paths, symlinks, out-of-scope paths, and nested exception-root paths
@@ -20,8 +24,12 @@
   `fsync`, and replace atomically.
 - Existing supporting-section bytes and the exact transcription payload are
   checked before a write. The script adds or normalizes one locally controlled
-  triple-backtick Transcription wrapper and preserves an existing canonical
-  wrapper byte-for-byte.
+  triple-backtick Transcription wrapper, permits only the synthetic newline
+  required before its closing fence, preserves raw-note trailing blank padding,
+  and preserves an existing canonical wrapper byte-for-byte. Blank separators
+  after a valid closing fence remain outside the transcription payload.
+- Write mode sends only the updated path to standard error and does not emit the
+  generated summary to standard output.
 - A transcription containing a standalone CommonMark backtick-closing line is
   rejected before credential loading, model access, or writing because the
   required exact triple-backtick wrapper cannot contain it without changing

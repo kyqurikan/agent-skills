@@ -78,6 +78,130 @@ class ExecutiveSummaryTests(unittest.TestCase):
                 with self.assertRaises(module.SummaryError):
                     module.extract_transcription(heading)
 
+    def test_frontmatter_single_line_write_preserves_frontmatter_and_payload(self):
+        prefix = (
+            "---\n"
+            "tags:\n"
+            "  - FY27\n"
+            "# YAML comment, not a Markdown heading\n"
+            "---\n\n"
+        )
+        raw = "  Speaker 1: Preserve this exact transcript line. 日本語.\t"
+        text = prefix + raw
+        self.assertTrue(module.is_raw_single_line_note(text))
+        self.assertEqual(module._raw_single_line_parts(text), (prefix, raw, ""))
+        self.assertEqual(module.extract_transcription(text), raw)
+
+        normalized = module.add_transcription_heading(text)
+        self.assertEqual(
+            normalized,
+            prefix + module.render_transcription_section(raw, "\n"),
+        )
+        self.assertTrue(
+            module.transcription_payload_is_preserved(normalized, raw, "\n")
+        )
+        payload, canonical, raw_single_line = module._transcription_state(normalized)
+        self.assertEqual(payload, raw + "\n")
+        self.assertTrue(canonical)
+        self.assertFalse(raw_single_line)
+
+        summary = "Opening.\n\n1. **Decision:**\n   - Proceed.\n\nClosing."
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            root = Path(temporary) / "Allowed Root"
+            note = root / "Nested Notes" / "2026-07-14-frontmatter.md"
+            note.parent.mkdir(parents=True)
+            note.write_text(text, encoding="utf-8")
+            original = note.read_bytes()
+
+            with mock.patch.object(module, "ALLOWED_ROOTS", (root,)):
+                with mock.patch.object(module, "load_api_key", return_value="test-secret"):
+                    with mock.patch.object(
+                        module,
+                        "request_summary",
+                        return_value=summary,
+                    ) as request_mock:
+                        preview_out = io.StringIO()
+                        preview_err = io.StringIO()
+                        with redirect_stdout(preview_out), redirect_stderr(preview_err):
+                            self.assertEqual(module.main([str(note)]), 0)
+                        self.assertEqual(note.read_bytes(), original)
+                        self.assertIn(
+                            "Detected YAML frontmatter followed by one transcript line",
+                            preview_err.getvalue(),
+                        )
+
+                        write_out = io.StringIO()
+                        write_err = io.StringIO()
+                        with redirect_stdout(write_out), redirect_stderr(write_err):
+                            self.assertEqual(module.main([str(note), "--write"]), 0)
+                        self.assertEqual(write_out.getvalue(), "")
+                        self.assertEqual(
+                            [call.args[0] for call in request_mock.call_args_list],
+                            [raw, raw],
+                        )
+
+            updated = note.read_text(encoding="utf-8")
+            self.assertTrue(updated.startswith(prefix))
+            self.assertEqual(
+                [heading.title for heading in module._structural_h2_headings(updated)],
+                list(module.CANONICAL_SECTION_TITLES),
+            )
+            self.assertTrue(
+                module.transcription_payload_is_preserved(updated, raw, "\n")
+            )
+
+        padded_payload = "Speaker 1: Preserve trailing padding.\n"
+        padded_suffix = "\n"
+        padded = prefix + padded_payload + padded_suffix
+        self.assertEqual(
+            module._raw_single_line_parts(padded),
+            (prefix, padded_payload, padded_suffix),
+        )
+        self.assertEqual(
+            module.add_transcription_heading(padded),
+            prefix
+            + module.render_transcription_section(padded_payload, "\n")
+            + padded_suffix,
+        )
+
+    def test_frontmatter_single_line_rejects_ambiguous_or_malformed_notes(self):
+        valid_flow = (
+            "---\n"
+            'tags: [FY27, "Q1"]\n'
+            "status: open\n"
+            "owner: O'Brien\n"
+            "aliases: [O'Brien, Sales]\n"
+            "---\n"
+            "Transcript after valid scalar and flow-list properties."
+        )
+        self.assertTrue(module.is_raw_single_line_note(valid_flow))
+
+        cases = (
+            "---\ntags: [FY27]\nTranscript without closing frontmatter",
+            "---\ntags: [FY27\n---\nTranscript after invalid YAML.",
+            "---\ntags: [FY27]\ntags: [Q1]\n---\nTranscript after duplicate key.",
+            "---\nname # ignored: value\n---\nTranscript after a commented pseudo-key.",
+            "---\nname\t: value\n---\nTranscript after a tab in a property line.",
+            "---\nhttps://example.invalid\n---\nTranscript after a plain scalar line.",
+            '---\nproperty: "\\q"\n---\nTranscript after an invalid escape.',
+            '---\nproperty: "\\U00110000"\n---\nTranscript after an invalid code point.',
+            '---\nproperty: "\\uD800"\n---\nTranscript after a surrogate escape.',
+            "---\nproperty: [a,,b]\n---\nTranscript after a malformed flow sequence.",
+            "---\nproperty: [*missing]\n---\nTranscript after an undefined alias.",
+            "---\nproperty: {nested: value}\n---\nTranscript after a nested mapping.",
+            "---\nproperty:\n  - nested: value\n---\nTranscript after a mapping list item.",
+            "---\nproperty:\n  - first\n    - nested\n---\nTranscript after inconsistent list indentation.",
+            "---\nproperty:\n  -first\n---\nTranscript after an invalid sequence marker.",
+            "---\ntags: [FY27]\n---\n\nFirst line.\nSecond line.",
+            "---\ntags: [FY27]\n---\n\n## Not a transcript",
+            "---\ntags: [FY27]\n---\n\n",
+        )
+        for text in cases:
+            with self.subTest(text=text):
+                self.assertFalse(module.is_raw_single_line_note(text))
+                with self.assertRaises(module.SummaryError):
+                    module.extract_transcription(text)
+
     def test_raw_single_line_preview_is_read_only_and_write_adds_heading(self):
         raw = "  Speaker 1: Preserve this exact single-line transcript.\t"
         summary = "Opening.\n\n1. **Decision:**\n   - Proceed.\n\nClosing."
@@ -478,6 +602,25 @@ class ExecutiveSummaryTests(unittest.TestCase):
             [heading.title for heading in module._structural_h2_headings(updated)],
             list(module.CANONICAL_SECTION_TITLES),
         )
+
+    def test_canonical_transcription_allows_blank_separator_before_unrelated_heading(self):
+        text = (
+            "## Transcription\n"
+            "```\n"
+            "Speaker 1: Preserve this.\n"
+            "```\n\n"
+            "## Follow Up\n"
+            "Keep this unrelated section.\n"
+        )
+        self.assertTrue(module.transcription_is_canonically_fenced(text))
+        self.assertTrue(
+            module.transcription_payload_is_preserved(
+                text,
+                "Speaker 1: Preserve this.\n",
+                "\n",
+            )
+        )
+        self.assertEqual(module.ensure_transcription_fence(text), text)
 
     def test_transcription_wrapper_rejects_closing_fence_line(self):
         unsafe_payloads = (

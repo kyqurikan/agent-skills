@@ -1,6 +1,6 @@
 ---
 name: obsidian-executive-summary
-description: Generate and optionally insert a structured four-section sales-note summary in explicitly configured Obsidian Markdown roots, using a local OpenAI-compatible Cohere Command A endpoint only for the Executive Summary and deterministic placeholders for supporting sections. Use when a user asks to summarize a meeting transcription, preview or refresh an Executive Summary, create the full H2 structure, normalize a heading-free single-line transcript note, or enforce fenced Executive Summary and Transcription sections.
+description: Generate and optionally insert a structured four-section sales-note summary in explicitly configured Obsidian Markdown roots, using a local OpenAI-compatible Cohere Command A endpoint only for the Executive Summary and deterministic placeholders for supporting sections. Use when a user asks to summarize a meeting transcription, preview or refresh an Executive Summary, create the full H2 structure, normalize a heading-free single-line transcript note with or without YAML frontmatter, or enforce fenced Executive Summary and Transcription sections.
 ---
 
 # Obsidian Executive Summary
@@ -22,8 +22,10 @@ vault path, API key, or private note content.
 - Process only regular Markdown files beneath explicitly configured allowed roots or directly inside explicitly configured exception roots.
 - Reject hidden paths, symlinks, nested paths under exception roots, and configured holding-folder prefixes beneath standard roots.
 - Keep the transcription payload byte-for-byte unchanged. During an approved write, place it beneath `## Transcription` inside exactly one locally owned opening and closing ` ``` ` line. Add a synthetic line ending only when required to put the closing fence on its own line.
-- If a note has no Markdown headings and exactly one logical line, treat that line as the transcription. During an approved write, add `## Transcription` and its exact triple-backtick wrapper while preserving the original line byte-for-byte inside it.
+- If a note has no Markdown headings and exactly one logical transcript line, treat that line as the transcription. The note may begin with a closed, unambiguous Obsidian-properties YAML frontmatter block containing top-level scalar or list properties; preserve that block byte-for-byte and exclude it from model input. During an approved write, add `## Transcription` and its exact triple-backtick wrapper while preserving the transcript line byte-for-byte inside it.
+- Reject automatic raw-note normalization when YAML frontmatter is unclosed, malformed, uses duplicate keys or unsupported nested/advanced YAML constructs, when zero or multiple non-empty lines follow it, or when the candidate transcript line is a Markdown heading.
 - Preserve an existing canonical Transcription wrapper exactly. Normalize an unwrapped or unambiguously noncanonical outer wrapper to the exact local wrapper without changing its payload.
+- Treat blank section-separator lines after a valid closing Transcription fence as outside the payload and preserve existing raw-note trailing blank padding. When verifying a newly wrapped payload, permit only the synthetic line ending required to put the closing fence on its own line.
 - Reject a transcription containing a standalone line of three or more backticks with up to three leading spaces; it cannot be enclosed safely in the required exact triple-backtick wrapper without changing source content. Allow inline backticks, four-space-indented backticks, and tilde fences.
 - Create the complete H2 structure in this order: `## Executive Summary`, `## Relevant Emails and Notes`, `## Meeting Invitees`, and `## Transcription`.
 - Create those four H2 sections deterministically; never treat headings returned by the model as note structure.
@@ -42,10 +44,10 @@ vault path, API key, or private note content.
    python3 scripts/generate_summary.py "/absolute/path/to/note.md"
    ```
 
-   For a heading-free single-line note, the preview reports that `## Transcription` and its wrapper will be added during an approved write. For an existing unwrapped Transcription section, it reports that the wrapper will be normalized.
+   For a heading-free single-line note, including one after safe YAML frontmatter, the preview reports that `## Transcription` and its wrapper will be added during an approved write. For an existing unwrapped Transcription section, it reports that the wrapper will be normalized.
 
 4. Review the preview for unsupported claims, missing decisions, incorrect owners, and sensitive detail.
-5. Write only after the user explicitly approves the selected note. This creates missing canonical sections and guarantees the exact Transcription wrapper:
+5. Write only after the user explicitly approves the selected note. This preserves eligible YAML frontmatter and trailing blank padding, creates missing canonical sections, and guarantees the exact Transcription wrapper:
 
    ```bash
    python3 scripts/generate_summary.py "/absolute/path/to/note.md" --write
