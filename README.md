@@ -25,8 +25,8 @@ Read-only access to [MacWhisper](https://goodsnooze.gumroad.com/l/macwhisper) tr
 - **Key Features:** List unprocessed recordings, fetch diarized transcripts with hallucination filtering, keyword search, processed-session state tracking, and UTC time windows for calendar enrichment.
 
 ### 📝 [Obsidian Executive Summary](./skills/obsidian-executive-summary)
-Generate a structured four-section sales note from an approved Obsidian transcription using a fixed local OpenAI-compatible model endpoint.
-- **Key Features:** Preview-first operation, configurable path allowlists, atomic writes, exact transcript preservation inside a deterministic fence, normalized model delimiters, deterministic supporting sections, strict credential permissions, untrusted-transcript handling, and synthetic tests.
+Generate a structured four-section sales note from an approved Obsidian transcription using a fixed local OpenAI-compatible model endpoint, then stage successful writes for human review.
+- **Key Features:** Preview-first semantic review, configurable path allowlists, POSIX/macOS collision-safe staging into adjacent `AI Processed/` folders, source quarantine and verification, explicit recovery-path reporting, exact transcript preservation, strict credential permissions, untrusted-transcript handling, and synthetic tests.
 
 ### ⚠️ [Forced Summary](./skills/forced-summary)
 Force-write the pinned local endpoint's executive-summary output into eligible Obsidian notes, then move successful notes to `AI Processed/` for human review.

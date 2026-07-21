@@ -135,12 +135,15 @@ class ExecutiveSummaryTests(unittest.TestCase):
                         with redirect_stdout(write_out), redirect_stderr(write_err):
                             self.assertEqual(module.main([str(note), "--write"]), 0)
                         self.assertEqual(write_out.getvalue(), "")
+                        self.assertIn("Updated and moved for review", write_err.getvalue())
                         self.assertEqual(
                             [call.args[0] for call in request_mock.call_args_list],
                             [raw, raw],
                         )
 
-            updated = note.read_text(encoding="utf-8")
+            destination = note.parent / module.PROCESSED_DIRECTORY_NAME / note.name
+            self.assertFalse(note.exists())
+            updated = destination.read_text(encoding="utf-8")
             self.assertTrue(updated.startswith(prefix))
             self.assertEqual(
                 [heading.title for heading in module._structural_h2_headings(updated)],
@@ -231,12 +234,15 @@ class ExecutiveSummaryTests(unittest.TestCase):
                         with redirect_stdout(write_out), redirect_stderr(write_err):
                             self.assertEqual(module.main([str(note), "--write"]), 0)
                         self.assertEqual(write_out.getvalue(), "")
+                        self.assertIn("Updated and moved for review", write_err.getvalue())
                         self.assertEqual(
                             [call.args[0] for call in request_mock.call_args_list],
                             [raw, raw],
                         )
 
-            updated = note.read_text(encoding="utf-8")
+            destination = note.parent / module.PROCESSED_DIRECTORY_NAME / note.name
+            self.assertFalse(note.exists())
+            updated = destination.read_text(encoding="utf-8")
             self.assertTrue(updated.startswith("## Executive Summary"))
             self.assertEqual(
                 [heading.title for heading in module._structural_h2_headings(updated)],
@@ -432,11 +438,578 @@ class ExecutiveSummaryTests(unittest.TestCase):
                             self.assertEqual(module.main([str(note), "--write"]), 0)
                         self.assertEqual(output.getvalue(), "")
 
-            updated = note.read_text(encoding="utf-8")
+            destination = note.parent / module.PROCESSED_DIRECTORY_NAME / note.name
+            self.assertFalse(note.exists())
+            updated = destination.read_text(encoding="utf-8")
             expected = module.render_transcription_section(original_payload, "\n")
             self.assertTrue(updated.endswith(expected))
             self.assertIn(original_payload, updated)
             self.assertTrue(module.transcription_is_canonically_fenced(updated))
+
+    def test_destination_collision_prevents_key_loading_and_generation(self):
+        raw = "Speaker 1: Original transcript."
+        collision = "Existing human-review file."
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            root = Path(temporary) / "Allowed Root"
+            note = root / "Nested Notes" / "collision.md"
+            destination = note.parent / module.PROCESSED_DIRECTORY_NAME / note.name
+            destination.parent.mkdir(parents=True)
+            note.write_text(raw, encoding="utf-8")
+            destination.write_text(collision, encoding="utf-8")
+
+            with mock.patch.object(module, "ALLOWED_ROOTS", (root,)):
+                with mock.patch.object(module, "load_api_key") as key_mock:
+                    with mock.patch.object(module, "request_summary") as request_mock:
+                        errors = io.StringIO()
+                        with redirect_stderr(errors):
+                            self.assertEqual(module.main([str(note), "--write"]), 2)
+
+            key_mock.assert_not_called()
+            request_mock.assert_not_called()
+            self.assertIn("review destination already exists", errors.getvalue())
+            self.assertEqual(note.read_text(encoding="utf-8"), raw)
+            self.assertEqual(destination.read_text(encoding="utf-8"), collision)
+
+    def test_successful_write_moves_note_to_adjacent_review_folder(self):
+        raw = "Speaker 1: Move this transcript."
+        summary = "Opening.\n\n1. **Decision:**\n   - Review."
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            root = Path(temporary) / "Allowed Root"
+            note = root / "Nested Notes" / "move.md"
+            note.parent.mkdir(parents=True)
+            note.write_text(raw, encoding="utf-8")
+            destination = note.parent / module.PROCESSED_DIRECTORY_NAME / note.name
+
+            with mock.patch.object(module, "ALLOWED_ROOTS", (root,)):
+                with mock.patch.object(module, "load_api_key", return_value="test-secret"):
+                    with mock.patch.object(module, "request_summary", return_value=summary):
+                        errors = io.StringIO()
+                        with redirect_stderr(errors):
+                            self.assertEqual(module.main([str(note), "--write"]), 0)
+
+            self.assertFalse(note.exists())
+            self.assertTrue(destination.exists())
+            self.assertIn(raw, destination.read_text(encoding="utf-8"))
+            self.assertIn("Updated and moved for review", errors.getvalue())
+
+    def test_post_commit_parent_fsync_failure_is_a_success_warning(self):
+        raw = "Speaker 1: Commit before the final source-directory fsync."
+        summary = "Opening.\n\n1. **Decision:**\n   - Review."
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            root = Path(temporary) / "Allowed Root"
+            note = root / "Nested Notes" / "post-commit-fsync.md"
+            note.parent.mkdir(parents=True)
+            note.write_text(raw, encoding="utf-8")
+            destination = note.parent / module.PROCESSED_DIRECTORY_NAME / note.name
+            real_fsync = os.fsync
+
+            def fail_only_after_quarantine_removal(descriptor):
+                recovery = list(
+                    note.parent.glob(f".{note.name}.source-*.recovery")
+                )
+                if destination.exists() and not note.exists() and not recovery:
+                    raise OSError("Synthetic post-commit fsync failure.")
+                return real_fsync(descriptor)
+
+            with mock.patch.object(module, "ALLOWED_ROOTS", (root,)):
+                with mock.patch.object(module, "load_api_key", return_value="test-secret"):
+                    with mock.patch.object(module, "request_summary", return_value=summary):
+                        with mock.patch.object(
+                            module.os,
+                            "fsync",
+                            side_effect=fail_only_after_quarantine_removal,
+                        ):
+                            errors = io.StringIO()
+                            with redirect_stderr(errors):
+                                self.assertEqual(module.main([str(note), "--write"]), 0)
+
+            self.assertFalse(note.exists())
+            self.assertTrue(destination.exists())
+            self.assertIn("Warning: the source-directory fsync failed after commit", errors.getvalue())
+            self.assertIn("Updated and moved for review", errors.getvalue())
+
+    def test_post_commit_review_close_failure_is_a_success_warning(self):
+        raw = "Speaker 1: Commit before the review descriptor closes."
+        summary = "Opening.\n\n1. **Decision:**\n   - Review."
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            root = Path(temporary) / "Allowed Root"
+            note = root / "Nested Notes" / "post-commit-close.md"
+            note.parent.mkdir(parents=True)
+            note.write_text(raw, encoding="utf-8")
+            destination = note.parent / module.PROCESSED_DIRECTORY_NAME / note.name
+            real_close = os.close
+
+            def close_then_report_review_error(descriptor):
+                info = os.fstat(descriptor)
+                review_info = destination.parent.stat() if destination.exists() else None
+                is_review = bool(
+                    review_info
+                    and (info.st_dev, info.st_ino)
+                    == (review_info.st_dev, review_info.st_ino)
+                )
+                result = real_close(descriptor)
+                if is_review and not note.exists():
+                    raise OSError("Synthetic post-commit close failure.")
+                return result
+
+            with mock.patch.object(module, "ALLOWED_ROOTS", (root,)):
+                with mock.patch.object(module, "load_api_key", return_value="test-secret"):
+                    with mock.patch.object(module, "request_summary", return_value=summary):
+                        with mock.patch.object(
+                            module.os,
+                            "close",
+                            side_effect=close_then_report_review_error,
+                        ):
+                            errors = io.StringIO()
+                            with redirect_stderr(errors):
+                                self.assertEqual(module.main([str(note), "--write"]), 0)
+
+            self.assertFalse(note.exists())
+            self.assertTrue(destination.exists())
+            self.assertIn("Warning: the AI Processed directory descriptor", errors.getvalue())
+            self.assertIn("Updated and moved for review", errors.getvalue())
+
+    def test_endpoint_failure_leaves_source_and_review_destination_absent(self):
+        raw = "Speaker 1: Endpoint failure transcript."
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            root = Path(temporary) / "Allowed Root"
+            note = root / "Nested Notes" / "endpoint-failure.md"
+            note.parent.mkdir(parents=True)
+            note.write_text(raw, encoding="utf-8")
+            destination = note.parent / module.PROCESSED_DIRECTORY_NAME / note.name
+
+            with mock.patch.object(module, "ALLOWED_ROOTS", (root,)):
+                with mock.patch.object(module, "load_api_key", return_value="test-secret"):
+                    with mock.patch.object(
+                        module,
+                        "request_summary",
+                        side_effect=module.SummaryError(
+                            "The local summary endpoint could not be reached."
+                        ),
+                    ):
+                        errors = io.StringIO()
+                        with redirect_stderr(errors):
+                            self.assertEqual(module.main([str(note), "--write"]), 2)
+
+            self.assertEqual(note.read_text(encoding="utf-8"), raw)
+            self.assertFalse(destination.exists())
+            self.assertFalse(destination.parent.exists())
+            self.assertIn("endpoint could not be reached", errors.getvalue())
+
+    def test_move_failure_rolls_back_review_copy_and_preserves_source(self):
+        raw = "Speaker 1: Rollback transcript."
+        summary = "Opening.\n\n1. **Decision:**\n   - Review."
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            root = Path(temporary) / "Allowed Root"
+            note = root / "Nested Notes" / "rollback.md"
+            note.parent.mkdir(parents=True)
+            note.write_text(raw, encoding="utf-8")
+            destination = note.parent / module.PROCESSED_DIRECTORY_NAME / note.name
+            real_link = os.link
+
+            def fail_publication_link(source, target, **kwargs):
+                if ".summary-" in str(source):
+                    raise OSError("Synthetic publication failure.")
+                return real_link(source, target, **kwargs)
+
+            with mock.patch.object(module, "ALLOWED_ROOTS", (root,)):
+                with mock.patch.object(module, "load_api_key", return_value="test-secret"):
+                    with mock.patch.object(module, "request_summary", return_value=summary):
+                        with mock.patch.object(
+                            module.os,
+                            "link",
+                            side_effect=fail_publication_link,
+                        ):
+                            errors = io.StringIO()
+                            with redirect_stderr(errors):
+                                self.assertEqual(module.main([str(note), "--write"]), 2)
+
+            recovery = list(note.parent.glob(f".{note.name}.source-*.recovery"))
+            self.assertEqual(note.read_text(encoding="utf-8"), raw)
+            self.assertEqual(len(recovery), 1)
+            self.assertEqual(recovery[0].read_text(encoding="utf-8"), raw)
+            self.assertFalse(destination.exists())
+            self.assertIn("could not be published safely", errors.getvalue())
+            self.assertIn(str(recovery[0]), errors.getvalue())
+
+    def test_rollback_keeps_quarantine_if_restored_source_is_replaced(self):
+        raw = "Speaker 1: Original rollback transcript."
+        concurrent = "Speaker 1: Concurrent replacement during rollback."
+        summary = "Opening.\n\n1. **Decision:**\n   - Review."
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            root = Path(temporary) / "Allowed Root"
+            note = root / "Nested Notes" / "rollback-race.md"
+            note.parent.mkdir(parents=True)
+            note.write_text(raw, encoding="utf-8")
+            destination = note.parent / module.PROCESSED_DIRECTORY_NAME / note.name
+            real_link = os.link
+
+            def fail_publication_then_replace_restored_source(source, target, **kwargs):
+                if ".summary-" in str(source):
+                    raise OSError("Synthetic publication failure.")
+                result = real_link(source, target, **kwargs)
+                if ".source-" in str(source):
+                    note.unlink()
+                    note.write_text(concurrent, encoding="utf-8")
+                return result
+
+            with mock.patch.object(module, "ALLOWED_ROOTS", (root,)):
+                with mock.patch.object(module, "load_api_key", return_value="test-secret"):
+                    with mock.patch.object(module, "request_summary", return_value=summary):
+                        with mock.patch.object(
+                            module.os,
+                            "link",
+                            side_effect=fail_publication_then_replace_restored_source,
+                        ):
+                            errors = io.StringIO()
+                            with redirect_stderr(errors):
+                                self.assertEqual(module.main([str(note), "--write"]), 2)
+
+            recovery = list(note.parent.glob(f".{note.name}.source-*.recovery"))
+            self.assertEqual(note.read_text(encoding="utf-8"), concurrent)
+            self.assertEqual(len(recovery), 1)
+            self.assertEqual(recovery[0].read_text(encoding="utf-8"), raw)
+            self.assertFalse(destination.exists())
+            self.assertIn(str(recovery[0]), errors.getvalue())
+
+    def test_concurrent_destination_creation_is_not_overwritten(self):
+        raw = "Speaker 1: Destination race transcript."
+        concurrent = "Concurrent human-review file."
+        summary = "Opening.\n\n1. **Decision:**\n   - Review."
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            root = Path(temporary) / "Allowed Root"
+            note = root / "Nested Notes" / "destination-race.md"
+            note.parent.mkdir(parents=True)
+            note.write_text(raw, encoding="utf-8")
+            destination = note.parent / module.PROCESSED_DIRECTORY_NAME / note.name
+            real_link = os.link
+
+            def create_destination_then_link(source, target, **kwargs):
+                if ".summary-" in str(source):
+                    destination.write_text(concurrent, encoding="utf-8")
+                return real_link(source, target, **kwargs)
+
+            with mock.patch.object(module, "ALLOWED_ROOTS", (root,)):
+                with mock.patch.object(module, "load_api_key", return_value="test-secret"):
+                    with mock.patch.object(module, "request_summary", return_value=summary):
+                        with mock.patch.object(
+                            module.os,
+                            "link",
+                            side_effect=create_destination_then_link,
+                        ):
+                            errors = io.StringIO()
+                            with redirect_stderr(errors):
+                                self.assertEqual(module.main([str(note), "--write"]), 2)
+
+            self.assertEqual(note.read_text(encoding="utf-8"), raw)
+            self.assertEqual(destination.read_text(encoding="utf-8"), concurrent)
+            self.assertIn("could not be published safely", errors.getvalue())
+
+    def test_concurrent_source_replacement_after_quarantine_requires_recovery(self):
+        raw = "Speaker 1: Original source transcript."
+        concurrent = "Speaker 1: Concurrent source edit."
+        summary = "Opening.\n\n1. **Decision:**\n   - Review."
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            root = Path(temporary) / "Allowed Root"
+            note = root / "Nested Notes" / "source-race.md"
+            note.parent.mkdir(parents=True)
+            note.write_text(raw, encoding="utf-8")
+            destination = note.parent / module.PROCESSED_DIRECTORY_NAME / note.name
+            real_rename = os.rename
+
+            def quarantine_then_replace_source(source, target, **kwargs):
+                result = real_rename(source, target, **kwargs)
+                note.write_text(concurrent, encoding="utf-8")
+                return result
+
+            with mock.patch.object(module, "ALLOWED_ROOTS", (root,)):
+                with mock.patch.object(module, "load_api_key", return_value="test-secret"):
+                    with mock.patch.object(module, "request_summary", return_value=summary):
+                        with mock.patch.object(
+                            module.os,
+                            "rename",
+                            side_effect=quarantine_then_replace_source,
+                        ):
+                            errors = io.StringIO()
+                            with redirect_stderr(errors):
+                                self.assertEqual(module.main([str(note), "--write"]), 2)
+
+            recovery = list(note.parent.glob(f".{note.name}.source-*.recovery"))
+            self.assertEqual(note.read_text(encoding="utf-8"), concurrent)
+            self.assertTrue(destination.exists())
+            self.assertIn(raw, destination.read_text(encoding="utf-8"))
+            self.assertEqual(len(recovery), 1)
+            self.assertEqual(recovery[0].read_text(encoding="utf-8"), raw)
+            self.assertIn("concurrent source appeared", errors.getvalue())
+            self.assertIn(str(recovery[0]), errors.getvalue())
+
+    def test_source_edit_during_generation_is_restored_without_deletion(self):
+        raw = "Speaker 1: Original source transcript."
+        concurrent = "Speaker 1: Concurrent source edit."
+        summary = "Opening.\n\n1. **Decision:**\n   - Review."
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            root = Path(temporary) / "Allowed Root"
+            note = root / "Nested Notes" / "generation-race.md"
+            note.parent.mkdir(parents=True)
+            note.write_text(raw, encoding="utf-8")
+            destination = note.parent / module.PROCESSED_DIRECTORY_NAME / note.name
+
+            def edit_during_generation(*args, **kwargs):
+                note.write_text(concurrent, encoding="utf-8")
+                return summary
+
+            with mock.patch.object(module, "ALLOWED_ROOTS", (root,)):
+                with mock.patch.object(module, "load_api_key", return_value="test-secret"):
+                    with mock.patch.object(
+                        module,
+                        "request_summary",
+                        side_effect=edit_during_generation,
+                    ):
+                        errors = io.StringIO()
+                        with redirect_stderr(errors):
+                            self.assertEqual(module.main([str(note), "--write"]), 2)
+
+            self.assertEqual(note.read_text(encoding="utf-8"), concurrent)
+            self.assertFalse(destination.exists())
+            self.assertIn("note changed while the summary was generated", errors.getvalue())
+
+    def test_note_in_ai_processed_is_previewed_then_updated_in_place(self):
+        raw = "Speaker 1: Reprocess this transcript."
+        summary = "Opening.\n\n1. **Decision:**\n   - Review again."
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            root = Path(temporary) / "Allowed Root"
+            note = root / "Nested Notes" / module.PROCESSED_DIRECTORY_NAME / "review.md"
+            note.parent.mkdir(parents=True)
+            note.write_text(raw, encoding="utf-8")
+            original = note.read_bytes()
+
+            with mock.patch.object(module, "ALLOWED_ROOTS", (root,)):
+                with mock.patch.object(module, "load_api_key", return_value="test-secret"):
+                    with mock.patch.object(
+                        module,
+                        "request_summary",
+                        return_value=summary,
+                    ) as request_mock:
+                        preview_out = io.StringIO()
+                        preview_err = io.StringIO()
+                        with redirect_stdout(preview_out), redirect_stderr(preview_err):
+                            self.assertEqual(module.main([str(note)]), 0)
+                        self.assertEqual(note.read_bytes(), original)
+                        self.assertIn("Preview only", preview_err.getvalue())
+                        self.assertIn(
+                            "keep the note in its existing AI Processed review folder",
+                            preview_err.getvalue(),
+                        )
+
+                        write_out = io.StringIO()
+                        write_err = io.StringIO()
+                        with redirect_stdout(write_out), redirect_stderr(write_err):
+                            self.assertEqual(module.main([str(note), "--write"]), 0)
+
+            self.assertEqual(write_out.getvalue(), "")
+            self.assertTrue(note.exists())
+            self.assertFalse((note.parent / module.PROCESSED_DIRECTORY_NAME).exists())
+            self.assertIn(raw, note.read_text(encoding="utf-8"))
+            self.assertIn("Updated in AI Processed", write_err.getvalue())
+            self.assertEqual(request_mock.call_count, 2)
+
+    def test_in_place_concurrent_replacement_is_preserved_with_recovery_artifact(self):
+        raw = "Speaker 1: Original review transcript."
+        concurrent = "Speaker 1: Concurrent human edit."
+        summary = "Opening.\n\n1. **Decision:**\n   - Review again."
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            root = Path(temporary) / "Allowed Root"
+            note = root / module.PROCESSED_DIRECTORY_NAME / "review-race.md"
+            note.parent.mkdir(parents=True)
+            note.write_text(raw, encoding="utf-8")
+            real_rename = os.rename
+
+            def quarantine_then_replace_source(source, target, **kwargs):
+                result = real_rename(source, target, **kwargs)
+                note.write_text(concurrent, encoding="utf-8")
+                return result
+
+            with mock.patch.object(module, "ALLOWED_ROOTS", (root,)):
+                with mock.patch.object(module, "load_api_key", return_value="test-secret"):
+                    with mock.patch.object(module, "request_summary", return_value=summary):
+                        with mock.patch.object(
+                            module.os,
+                            "rename",
+                            side_effect=quarantine_then_replace_source,
+                        ):
+                            errors = io.StringIO()
+                            with redirect_stderr(errors):
+                                self.assertEqual(module.main([str(note), "--write"]), 2)
+
+            recovery = list(note.parent.glob(f".{note.name}.source-*.recovery"))
+            self.assertEqual(note.read_text(encoding="utf-8"), concurrent)
+            self.assertEqual(len(recovery), 1)
+            self.assertEqual(recovery[0].read_text(encoding="utf-8"), raw)
+            self.assertIn(str(recovery[0]), errors.getvalue())
+
+    def test_review_directory_swap_cannot_redirect_publication(self):
+        raw = "Speaker 1: Keep publication inside the pinned directory."
+        summary = "Opening.\n\n1. **Decision:**\n   - Review."
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            root = Path(temporary) / "Allowed Root"
+            note = root / "Nested Notes" / "directory-race.md"
+            note.parent.mkdir(parents=True)
+            note.write_text(raw, encoding="utf-8")
+            review = note.parent / module.PROCESSED_DIRECTORY_NAME
+            displaced_review = note.parent / "AI Processed displaced"
+            outside = Path(temporary) / "Outside"
+            outside.mkdir()
+            real_create = module._create_exclusive_file
+
+            def swap_review_then_create(directory_fd, source_name):
+                review.rename(displaced_review)
+                review.symlink_to(outside, target_is_directory=True)
+                return real_create(directory_fd, source_name)
+
+            with mock.patch.object(module, "ALLOWED_ROOTS", (root,)):
+                with mock.patch.object(module, "load_api_key", return_value="test-secret"):
+                    with mock.patch.object(module, "request_summary", return_value=summary):
+                        with mock.patch.object(
+                            module,
+                            "_create_exclusive_file",
+                            side_effect=swap_review_then_create,
+                        ):
+                            errors = io.StringIO()
+                            with redirect_stderr(errors):
+                                self.assertEqual(module.main([str(note), "--write"]), 2)
+
+            self.assertEqual(note.read_text(encoding="utf-8"), raw)
+            self.assertFalse((outside / note.name).exists())
+            self.assertEqual(list(displaced_review.iterdir()), [])
+            self.assertIn("AI Processed directory changed", errors.getvalue())
+
+    def test_post_publication_review_swap_reports_pinned_directory_identity(self):
+        raw = "Speaker 1: Preserve review output after a directory swap."
+        summary = "Opening.\n\n1. **Decision:**\n   - Review."
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            root = Path(temporary) / "Allowed Root"
+            note = root / "Nested Notes" / "review-swap.md"
+            note.parent.mkdir(parents=True)
+            note.write_text(raw, encoding="utf-8")
+            review = note.parent / module.PROCESSED_DIRECTORY_NAME
+            displaced_review = note.parent / "AI Processed displaced"
+            outside = Path(temporary) / "Outside"
+            outside.mkdir()
+            real_link = os.link
+
+            def publish_then_swap_review(source, target, **kwargs):
+                result = real_link(source, target, **kwargs)
+                if ".summary-" in str(source):
+                    review.rename(displaced_review)
+                    review.symlink_to(outside, target_is_directory=True)
+                return result
+
+            with mock.patch.object(module, "ALLOWED_ROOTS", (root,)):
+                with mock.patch.object(module, "load_api_key", return_value="test-secret"):
+                    with mock.patch.object(module, "request_summary", return_value=summary):
+                        with mock.patch.object(
+                            module.os,
+                            "link",
+                            side_effect=publish_then_swap_review,
+                        ):
+                            errors = io.StringIO()
+                            with redirect_stderr(errors):
+                                self.assertEqual(module.main([str(note), "--write"]), 2)
+
+            recovery = list(note.parent.glob(f".{note.name}.source-*.recovery"))
+            self.assertFalse(note.exists())
+            self.assertEqual(len(recovery), 1)
+            self.assertEqual(recovery[0].read_text(encoding="utf-8"), raw)
+            self.assertTrue((displaced_review / note.name).exists())
+            self.assertFalse((outside / note.name).exists())
+            self.assertIn("pinned review directory", errors.getvalue())
+            self.assertIn(str(recovery[0]), errors.getvalue())
+
+    def test_source_parent_swap_preserves_both_directory_versions(self):
+        raw = "Speaker 1: Original pinned-parent transcript."
+        concurrent = "Speaker 1: Replacement-path transcript."
+        summary = "Opening.\n\n1. **Decision:**\n   - Review."
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            root = Path(temporary) / "Allowed Root"
+            note = root / "Nested Notes" / "parent-race.md"
+            note.parent.mkdir(parents=True)
+            note.write_text(raw, encoding="utf-8")
+            original_parent = note.parent
+            displaced_parent = root / "Nested Notes displaced"
+
+            def swap_parent_during_generation(*args, **kwargs):
+                original_parent.rename(displaced_parent)
+                original_parent.mkdir()
+                note.write_text(concurrent, encoding="utf-8")
+                return summary
+
+            with mock.patch.object(module, "ALLOWED_ROOTS", (root,)):
+                with mock.patch.object(module, "load_api_key", return_value="test-secret"):
+                    with mock.patch.object(
+                        module,
+                        "request_summary",
+                        side_effect=swap_parent_during_generation,
+                    ):
+                        errors = io.StringIO()
+                        with redirect_stderr(errors):
+                            self.assertEqual(module.main([str(note), "--write"]), 2)
+
+            self.assertEqual(note.read_text(encoding="utf-8"), concurrent)
+            self.assertEqual(
+                (displaced_parent / note.name).read_text(encoding="utf-8"),
+                raw,
+            )
+            self.assertFalse(
+                (displaced_parent / module.PROCESSED_DIRECTORY_NAME).exists()
+            )
+            self.assertIn("note parent changed", errors.getvalue())
+
+    def test_post_quarantine_parent_swap_reports_pinned_directory_identities(self):
+        raw = "Speaker 1: Original post-quarantine transcript."
+        concurrent = "Speaker 1: Replacement-path transcript."
+        summary = "Opening.\n\n1. **Decision:**\n   - Review."
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            root = Path(temporary) / "Allowed Root"
+            note = root / "Nested Notes" / "post-quarantine-parent-race.md"
+            note.parent.mkdir(parents=True)
+            note.write_text(raw, encoding="utf-8")
+            original_parent = note.parent
+            displaced_parent = root / "Nested Notes displaced"
+            real_link = os.link
+
+            def publish_then_swap_parent(source, target, **kwargs):
+                result = real_link(source, target, **kwargs)
+                if ".summary-" in str(source):
+                    original_parent.rename(displaced_parent)
+                    original_parent.mkdir()
+                    note.write_text(concurrent, encoding="utf-8")
+                return result
+
+            with mock.patch.object(module, "ALLOWED_ROOTS", (root,)):
+                with mock.patch.object(module, "load_api_key", return_value="test-secret"):
+                    with mock.patch.object(module, "request_summary", return_value=summary):
+                        with mock.patch.object(
+                            module.os,
+                            "link",
+                            side_effect=publish_then_swap_parent,
+                        ):
+                            errors = io.StringIO()
+                            with redirect_stderr(errors):
+                                self.assertEqual(module.main([str(note), "--write"]), 2)
+
+            recovery = list(
+                displaced_parent.glob(f".{note.name}.source-*.recovery")
+            )
+            published = (
+                displaced_parent / module.PROCESSED_DIRECTORY_NAME / note.name
+            )
+            self.assertEqual(note.read_text(encoding="utf-8"), concurrent)
+            self.assertEqual(len(recovery), 1)
+            self.assertEqual(recovery[0].read_text(encoding="utf-8"), raw)
+            self.assertTrue(published.exists())
+            self.assertIn("pinned source directory", errors.getvalue())
+            self.assertIn("pinned review directory", errors.getvalue())
+            self.assertIn(recovery[0].name, errors.getvalue())
 
     def test_existing_summary_requires_replace_and_can_be_replaced(self):
         text = (
@@ -677,21 +1250,27 @@ class ExecutiveSummaryTests(unittest.TestCase):
                     with self.assertRaises(module.SummaryError):
                         module.resolve_note(str(holding))
 
-    def test_path_guard_allows_only_direct_exception_files(self):
+    def test_path_guard_allows_direct_exception_and_review_files_only(self):
         with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
             base = Path(temporary)
             standard = base / "Allowed Root"
             exception = base / "Direct Exception"
             other_holding = base / "Adjacent Exception"
             direct = exception / "direct.md"
+            processed = exception / module.PROCESSED_DIRECTORY_NAME / "processed.md"
             nested = exception / "nested" / "nested.md"
+            nested_processed = (
+                exception / module.PROCESSED_DIRECTORY_NAME / "nested" / "nested.md"
+            )
             hidden = exception / ".hidden.md"
             other = other_holding / "other.md"
             standard.mkdir()
             direct.parent.mkdir()
             nested.parent.mkdir()
+            processed.parent.mkdir()
+            nested_processed.parent.mkdir()
             other.parent.mkdir()
-            for note in (direct, nested, hidden, other):
+            for note in (direct, processed, nested, nested_processed, hidden, other):
                 note.write_text("Raw transcript", encoding="utf-8")
 
             with mock.patch.object(module, "ALLOWED_ROOTS", (standard,)):
@@ -701,7 +1280,8 @@ class ExecutiveSummaryTests(unittest.TestCase):
                     (exception,),
                 ):
                     self.assertEqual(module.resolve_note(str(direct)), direct.resolve())
-                    for rejected in (nested, hidden, other):
+                    self.assertEqual(module.resolve_note(str(processed)), processed.resolve())
+                    for rejected in (nested, nested_processed, hidden, other):
                         with self.subTest(rejected=rejected):
                             with self.assertRaises(module.SummaryError):
                                 module.resolve_note(str(rejected))

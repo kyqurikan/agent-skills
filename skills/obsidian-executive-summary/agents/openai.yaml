@@ -1,4 +1,4 @@
 interface:
   display_name: "Obsidian Executive Summary"
-  short_description: "Summarize Obsidian meeting transcripts locally"
-  default_prompt: "Use $obsidian-executive-summary to generate a preview executive summary for a selected sales transcript note."
+  short_description: "Preview summaries and stage notes for review"
+  default_prompt: "Use $obsidian-executive-summary to preview and review a selected sales transcript before staging an approved write in AI Processed."

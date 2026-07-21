@@ -4,21 +4,21 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import http.client
 import json
 import os
 from pathlib import Path
 import re
+import secrets
 import stat
 import sys
-import tempfile
 
 
 ALLOWED_ROOTS_ENV = "OBSIDIAN_SUMMARY_ALLOWED_ROOTS"
 EXCEPTION_ROOTS_ENV = "OBSIDIAN_SUMMARY_EXCEPTION_ROOTS"
 HOLDING_PREFIX_ENV = "OBSIDIAN_SUMMARY_HOLDING_PREFIX"
 DEFAULT_HOLDING_PREFIX = "to be tagged fy"
+PROCESSED_DIRECTORY_NAME = "AI Processed"
 # Tests and embedded deployments may set explicit roots after importing the module.
 ALLOWED_ROOTS: tuple[Path, ...] = ()
 PERMANENT_EXCEPTION_ROOTS: tuple[Path, ...] = ()
@@ -34,6 +34,17 @@ MAX_TRANSCRIPT_CHARS = 600_000
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_SUMMARY_CHARS = 30_000
 REQUEST_TIMEOUT_SECONDS = 180
+DIRECTORY_OPEN_FLAGS = (
+    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+)
+FILE_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+FILE_CREATE_FLAGS = (
+    os.O_WRONLY
+    | os.O_CREAT
+    | os.O_EXCL
+    | os.O_NOFOLLOW
+    | getattr(os, "O_CLOEXEC", 0)
+)
 CANONICAL_SECTION_TITLES = (
     "Executive Summary",
     "Relevant Emails and Notes",
@@ -70,6 +81,36 @@ TRANSCRIPTION_CLOSING_BACKTICK_PATTERN = re.compile(r" {0,3}`{3,}[ \t]*")
 
 class SummaryError(Exception):
     """Safe, user-facing failure."""
+
+
+class NoteSnapshot:
+    """Pinned source state retained across endpoint generation."""
+
+    __slots__ = (
+        "original",
+        "text",
+        "mode",
+        "identity",
+        "parent_identity",
+        "parent_fd",
+    )
+
+    def __init__(
+        self,
+        *,
+        original: bytes,
+        text: str,
+        mode: int,
+        identity: tuple[int, int],
+        parent_identity: tuple[int, int],
+        parent_fd: int,
+    ) -> None:
+        self.original = original
+        self.text = text
+        self.mode = mode
+        self.identity = identity
+        self.parent_identity = parent_identity
+        self.parent_fd = parent_fd
 
 
 def _roots_from_environment(variable: str, *, required: bool) -> tuple[Path, ...]:
@@ -1063,61 +1104,505 @@ def resolve_note(value: str) -> Path:
     if any(part.startswith(".") for part in relative.parts):
         raise SummaryError("The selected note is in a hidden path.")
     if matched_exception:
-        if len(relative.parts) != 1:
+        is_direct_note = len(relative.parts) == 1
+        is_direct_review_note = (
+            len(relative.parts) == 2
+            and relative.parts[0].casefold()
+            == PROCESSED_DIRECTORY_NAME.casefold()
+        )
+        if not (is_direct_note or is_direct_review_note):
             raise SummaryError(
-                "Configured exception roots apply only to files directly in that folder."
+                "Configured exception roots apply only to files directly in that folder "
+                "or directly in its AI Processed review subfolder."
             )
     elif any(part.casefold().startswith(holding_prefix) for part in relative.parts):
         raise SummaryError("The selected note is in a configured holding path.")
     return resolved
 
 
-def read_note(path: Path) -> tuple[bytes, str, int]:
-    info = path.stat()
-    if info.st_size > MAX_NOTE_BYTES:
-        raise SummaryError(f"The note exceeds the {MAX_NOTE_BYTES:,}-byte safety limit.")
-    original = path.read_bytes()
+def read_note(path: Path) -> NoteSnapshot:
+    """Read a note through a pinned parent directory and retain that directory FD."""
+    parent_fd = -1
+    source_fd = -1
+    retain_parent_fd = False
     try:
-        text = original.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise SummaryError("The note is not valid UTF-8 Markdown.") from exc
-    return original, text, stat.S_IMODE(info.st_mode)
+        parent_before = os.lstat(path.parent)
+        if not stat.S_ISDIR(parent_before.st_mode):
+            raise SummaryError("The note parent must be a real directory.")
+        parent_fd = os.open(path.parent, DIRECTORY_OPEN_FLAGS)
+        parent_after = os.fstat(parent_fd)
+        parent_identity = (parent_after.st_dev, parent_after.st_ino)
+        if parent_identity != (parent_before.st_dev, parent_before.st_ino):
+            raise SummaryError("The note parent changed while it was being opened.")
 
+        source_fd = os.open(path.name, FILE_READ_FLAGS, dir_fd=parent_fd)
+        before = os.fstat(source_fd)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+            or before.st_nlink != 1
+        ):
+            raise SummaryError(
+                "The selected note must remain a regular, user-owned file without links."
+            )
+        if before.st_size > MAX_NOTE_BYTES:
+            raise SummaryError(f"The note exceeds the {MAX_NOTE_BYTES:,}-byte safety limit.")
 
-def atomic_write(path: Path, new_text: str, original_mode: int) -> None:
-    payload = new_text.encode("utf-8")
-    descriptor = -1
-    temporary_path = None
-    try:
-        descriptor, temporary_name = tempfile.mkstemp(
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            dir=str(path.parent),
+        with os.fdopen(source_fd, "rb") as handle:
+            source_fd = -1
+            original = handle.read(MAX_NOTE_BYTES + 1)
+            after = os.fstat(handle.fileno())
+        stable_fields_before = (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
         )
-        temporary_path = Path(temporary_name)
-        os.fchmod(descriptor, original_mode)
-        with os.fdopen(descriptor, "wb") as handle:
-            descriptor = -1
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary_path, path)
-        temporary_path = None
-        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        stable_fields_after = (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        )
+        if stable_fields_before != stable_fields_after or len(original) != before.st_size:
+            raise SummaryError("The note changed while it was being read.")
+        if len(original) > MAX_NOTE_BYTES:
+            raise SummaryError(f"The note exceeds the {MAX_NOTE_BYTES:,}-byte safety limit.")
         try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+            text = original.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise SummaryError("The note is not valid UTF-8 Markdown.") from exc
+        snapshot = NoteSnapshot(
+            original=original,
+            text=text,
+            mode=stat.S_IMODE(before.st_mode),
+            identity=(before.st_dev, before.st_ino),
+            parent_identity=parent_identity,
+            parent_fd=parent_fd,
+        )
+        retain_parent_fd = True
+        return snapshot
     except OSError as exc:
-        raise SummaryError("The note could not be updated atomically.") from exc
+        raise SummaryError("The note could not be opened through a pinned directory.") from exc
+    finally:
+        if source_fd >= 0:
+            try:
+                os.close(source_fd)
+            except OSError:
+                pass
+        if parent_fd >= 0 and not retain_parent_fd:
+            try:
+                os.close(parent_fd)
+            except OSError:
+                pass
+
+
+def processed_destination(path: Path) -> Path:
+    """Return the adjacent human-review destination for a successful write."""
+    if path.parent.name.casefold() == PROCESSED_DIRECTORY_NAME.casefold():
+        return path
+    return path.parent / PROCESSED_DIRECTORY_NAME / path.name
+
+
+def _entry_info(directory_fd: int, name: str) -> os.stat_result | None:
+    try:
+        return os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+
+
+def _validate_review_directory(review_fd: int) -> None:
+    info = os.fstat(review_fd)
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        raise SummaryError("The AI Processed path must be a real, user-owned directory.")
+
+
+def _review_binding_matches(parent_fd: int, review_fd: int) -> bool:
+    current = _entry_info(parent_fd, PROCESSED_DIRECTORY_NAME)
+    pinned = os.fstat(review_fd)
+    return bool(
+        current
+        and stat.S_ISDIR(current.st_mode)
+        and (current.st_dev, current.st_ino) == (pinned.st_dev, pinned.st_ino)
+    )
+
+
+def _parent_binding_matches(path: Path, snapshot: NoteSnapshot) -> bool:
+    try:
+        current = os.stat(path.parent, follow_symlinks=False)
+    except OSError:
+        return False
+    return (current.st_dev, current.st_ino) == snapshot.parent_identity
+
+
+def preflight_processed_destination(path: Path, parent_fd: int) -> Path:
+    """Validate the review destination relative to the pinned source parent."""
+    destination = processed_destination(path)
+    if destination == path:
+        return destination
+
+    review_fd = -1
+    try:
+        try:
+            review_fd = os.open(
+                PROCESSED_DIRECTORY_NAME,
+                DIRECTORY_OPEN_FLAGS,
+                dir_fd=parent_fd,
+            )
+        except FileNotFoundError:
+            return destination
+        _validate_review_directory(review_fd)
+        if _entry_info(review_fd, destination.name) is not None:
+            raise SummaryError(
+                f"The review destination already exists; no processing occurred: {destination}"
+            )
+        return destination
+    except SummaryError:
+        raise
+    except OSError as exc:
+        raise SummaryError("The AI Processed folder could not be inspected safely.") from exc
+    finally:
+        if review_fd >= 0:
+            try:
+                os.close(review_fd)
+            except OSError:
+                pass
+
+
+def _create_exclusive_file(directory_fd: int, source_name: str) -> tuple[int, str]:
+    for _ in range(64):
+        name = f".{source_name}.summary-{secrets.token_hex(16)}.tmp"
+        try:
+            descriptor = os.open(
+                name,
+                FILE_CREATE_FLAGS,
+                0o600,
+                dir_fd=directory_fd,
+            )
+        except FileExistsError:
+            continue
+        return descriptor, name
+    raise SummaryError("A unique temporary summary file could not be allocated safely.")
+
+
+def _unique_quarantine_name(parent_fd: int, source_name: str) -> str:
+    for _ in range(64):
+        name = f".{source_name}.source-{secrets.token_hex(16)}.recovery"
+        if _entry_info(parent_fd, name) is None:
+            return name
+    raise SummaryError("A unique source recovery name could not be allocated safely.")
+
+
+def _quarantine_matches_snapshot(
+    parent_fd: int,
+    quarantine_name: str,
+    snapshot: NoteSnapshot,
+) -> bool:
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            quarantine_name,
+            FILE_READ_FLAGS,
+            dir_fd=parent_fd,
+        )
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or (before.st_dev, before.st_ino) != snapshot.identity
+            or before.st_uid != os.getuid()
+        ):
+            return False
+        with os.fdopen(descriptor, "rb") as handle:
+            descriptor = -1
+            payload = handle.read(MAX_NOTE_BYTES + 1)
+            after = os.fstat(handle.fileno())
+        return bool(
+            (after.st_dev, after.st_ino) == snapshot.identity
+            and after.st_size == before.st_size
+            and after.st_mtime_ns == before.st_mtime_ns
+            and after.st_ctime_ns == before.st_ctime_ns
+            and payload == snapshot.original
+        )
+    except OSError:
+        return False
     finally:
         if descriptor >= 0:
             os.close(descriptor)
-        if temporary_path is not None:
+
+
+def _link_quarantine_to_source(
+    parent_fd: int,
+    quarantine_name: str,
+    source_name: str,
+) -> bool:
+    """Restore a source link without ever removing the recovery quarantine."""
+    try:
+        os.link(
+            quarantine_name,
+            source_name,
+            src_dir_fd=parent_fd,
+            dst_dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
+    except OSError:
+        return False
+    try:
+        os.fsync(parent_fd)
+    except OSError:
+        return False
+    return True
+
+
+def _source_artifact_location(
+    path: Path,
+    name: str,
+    snapshot: NoteSnapshot,
+) -> str:
+    if _parent_binding_matches(path, snapshot):
+        return str(path.parent / name)
+    device, inode = snapshot.parent_identity
+    return (
+        f"entry {name!r} in pinned source directory dev={device}, inode={inode} "
+        "(pathname binding changed)"
+    )
+
+
+def _publication_artifact_location(
+    path: Path,
+    destination: Path,
+    name: str,
+    snapshot: NoteSnapshot,
+    publication_fd: int,
+    review_fd: int,
+) -> str:
+    binding_is_current = _parent_binding_matches(path, snapshot)
+    if review_fd >= 0:
+        binding_is_current = binding_is_current and _review_binding_matches(
+            snapshot.parent_fd,
+            review_fd,
+        )
+    if binding_is_current:
+        directory = destination.parent if review_fd >= 0 else path.parent
+        return str(directory / name)
+    info = os.fstat(publication_fd)
+    label = "review" if review_fd >= 0 else "source"
+    return (
+        f"entry {name!r} in pinned {label} directory dev={info.st_dev}, "
+        f"inode={info.st_ino} (pathname binding changed)"
+    )
+
+
+def atomic_write_and_move(
+    path: Path,
+    destination: Path,
+    new_text: str,
+    snapshot: NoteSnapshot,
+) -> tuple[str, ...]:
+    """Publish via pinned directory FDs and retire only a verified source inode."""
+    parent_fd = snapshot.parent_fd
+    review_fd = -1
+    publication_fd = parent_fd
+    created_review_directory = False
+    descriptor = -1
+    temporary_name: str | None = None
+    quarantine_name: str | None = None
+    source_quarantined = False
+    published = False
+    publication_identity: tuple[int, int] | None = None
+    failure: SummaryError | None = None
+    failure_cause: OSError | None = None
+
+    try:
+        if not _parent_binding_matches(path, snapshot):
+            raise SummaryError("The note parent changed while the summary was generated.")
+
+        if destination != path:
             try:
-                temporary_path.unlink()
-            except OSError:
+                os.mkdir(
+                    PROCESSED_DIRECTORY_NAME,
+                    0o700,
+                    dir_fd=parent_fd,
+                )
+                created_review_directory = True
+                os.fsync(parent_fd)
+            except FileExistsError:
                 pass
+            review_fd = os.open(
+                PROCESSED_DIRECTORY_NAME,
+                DIRECTORY_OPEN_FLAGS,
+                dir_fd=parent_fd,
+            )
+            _validate_review_directory(review_fd)
+            publication_fd = review_fd
+            if _entry_info(review_fd, destination.name) is not None:
+                raise SummaryError(
+                    f"The review destination already exists; no write occurred: {destination}"
+                )
+
+        descriptor, temporary_name = _create_exclusive_file(
+            publication_fd,
+            path.name,
+        )
+        os.fchmod(descriptor, snapshot.mode)
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = -1
+            handle.write(new_text.encode("utf-8"))
+            handle.flush()
+            os.fsync(handle.fileno())
+            temporary_info = os.fstat(handle.fileno())
+            publication_identity = (temporary_info.st_dev, temporary_info.st_ino)
+
+        if review_fd >= 0 and not _review_binding_matches(parent_fd, review_fd):
+            raise SummaryError("The AI Processed directory changed before publication.")
+        if not _parent_binding_matches(path, snapshot):
+            raise SummaryError("The note parent changed before publication.")
+
+        quarantine_name = _unique_quarantine_name(parent_fd, path.name)
+        os.rename(
+            path.name,
+            quarantine_name,
+            src_dir_fd=parent_fd,
+            dst_dir_fd=parent_fd,
+        )
+        source_quarantined = True
+        if not _quarantine_matches_snapshot(parent_fd, quarantine_name, snapshot):
+            raise SummaryError(
+                "The note changed while the summary was generated; no source content was deleted."
+            )
+        os.fsync(parent_fd)
+
+        if _entry_info(publication_fd, destination.name) is not None:
+            raise SummaryError(
+                f"The publication destination appeared concurrently: {destination}"
+            )
+        os.link(
+            temporary_name,
+            destination.name,
+            src_dir_fd=publication_fd,
+            dst_dir_fd=publication_fd,
+            follow_symlinks=False,
+        )
+        published = True
+        os.unlink(temporary_name, dir_fd=publication_fd)
+        temporary_name = None
+        os.fsync(publication_fd)
+
+        published_info = _entry_info(publication_fd, destination.name)
+        if (
+            published_info is None
+            or (published_info.st_dev, published_info.st_ino) != publication_identity
+        ):
+            raise SummaryError("The published summary changed before source retirement.")
+        if destination != path and _entry_info(parent_fd, path.name) is not None:
+            raise SummaryError(
+                "A concurrent source appeared after quarantine; recovery is required."
+            )
+
+        if review_fd >= 0 and not _review_binding_matches(parent_fd, review_fd):
+            raise SummaryError(
+                "The AI Processed directory changed after publication; recovery is required."
+            )
+        if not _parent_binding_matches(path, snapshot):
+            raise SummaryError("The note parent changed after publication; recovery is required.")
+
+        os.unlink(quarantine_name, dir_fd=parent_fd)
+        quarantine_name = None
+        post_commit_warnings: list[str] = []
+        try:
+            os.fsync(parent_fd)
+        except OSError:
+            post_commit_warnings.append(
+                "the source-directory fsync failed after commit; verify durability "
+                f"at {destination}"
+            )
+        if review_fd >= 0:
+            descriptor_to_close = review_fd
+            review_fd = -1
+            try:
+                os.close(descriptor_to_close)
+            except OSError:
+                post_commit_warnings.append(
+                    "the AI Processed directory descriptor reported a close error "
+                    f"after commit; verify {destination}"
+                )
+        return tuple(post_commit_warnings)
+    except SummaryError as exc:
+        failure = exc
+    except OSError as exc:
+        failure = SummaryError(
+            "The processed note could not be published safely to AI Processed."
+        )
+        failure_cause = exc
+
+    cleanup_issues: list[str] = []
+    if descriptor >= 0:
+        try:
+            os.close(descriptor)
+        except OSError:
+            cleanup_issues.append("temporary descriptor")
+    if temporary_name is not None:
+        try:
+            os.unlink(temporary_name, dir_fd=publication_fd)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            cleanup_issues.append(
+                _publication_artifact_location(
+                    path,
+                    destination,
+                    temporary_name,
+                    snapshot,
+                    publication_fd,
+                    review_fd,
+                )
+            )
+
+    if quarantine_name is not None and source_quarantined:
+        if not published:
+            _link_quarantine_to_source(parent_fd, quarantine_name, path.name)
+        cleanup_issues.append(
+            _source_artifact_location(path, quarantine_name, snapshot)
+        )
+
+    if published:
+        cleanup_issues.append(
+            "published output at "
+            + _publication_artifact_location(
+                path,
+                destination,
+                destination.name,
+                snapshot,
+                publication_fd,
+                review_fd,
+            )
+        )
+
+    if review_fd >= 0:
+        try:
+            os.close(review_fd)
+        except OSError:
+            cleanup_issues.append("AI Processed directory descriptor")
+        review_fd = -1
+    if created_review_directory and not published:
+        try:
+            os.rmdir(PROCESSED_DIRECTORY_NAME, dir_fd=parent_fd)
+            os.fsync(parent_fd)
+        except OSError:
+            pass
+
+    if failure is None:
+        failure = SummaryError("The processed-note publication did not finish cleanly.")
+    if cleanup_issues:
+        artifacts = ", ".join(dict.fromkeys(cleanup_issues))
+        failure = SummaryError(
+            f"{failure} Preserved or uncertain recovery locations: {artifacts}. "
+            "Inspect them before retrying or deleting anything."
+        )
+    if failure_cause is not None:
+        raise failure from failure_cause
+    raise failure
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1128,7 +1613,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--write",
         action="store_true",
-        help="Atomically write the generated summary and complete reference H2 structure",
+        help=(
+            "Write the generated summary and complete reference H2 structure, then "
+            "move the note to AI Processed"
+        ),
     )
     parser.add_argument(
         "--replace-existing",
@@ -1140,11 +1628,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    snapshot: NoteSnapshot | None = None
     try:
         if args.replace_existing and not args.write:
             raise SummaryError("--replace-existing requires --write.")
         path = resolve_note(args.note)
-        original, text, original_mode = read_note(path)
+        snapshot = read_note(path)
+        text = snapshot.text
+        destination = preflight_processed_destination(path, snapshot.parent_fd)
         raw_parts = _raw_single_line_parts(text)
         raw_single_line = raw_parts is not None
         raw_frontmatter_prefix = raw_parts[0] if raw_parts is not None else ""
@@ -1183,8 +1674,6 @@ def main(argv: list[str] | None = None) -> int:
         if not args.write:
             print(rendered)
         if args.write:
-            if hashlib.sha256(path.read_bytes()).digest() != hashlib.sha256(original).digest():
-                raise SummaryError("The note changed while the summary was generated; no write occurred.")
             updated = apply_template_sections(editable_text, rendered)
             for title, original_section in preserved_supporting_sections.items():
                 bounds = _section_bounds(updated, title)
@@ -1234,8 +1723,18 @@ def main(argv: list[str] | None = None) -> int:
                         "The generated edit would alter the Transcription section; "
                         "no write occurred."
                     )
-            atomic_write(path, updated, original_mode)
-            print(f"Updated: {path}", file=sys.stderr)
+            post_commit_warnings = atomic_write_and_move(
+                path,
+                destination,
+                updated,
+                snapshot,
+            )
+            for warning in post_commit_warnings:
+                print(f"Warning: {warning}", file=sys.stderr)
+            if destination == path:
+                print(f"Updated in AI Processed: {destination}", file=sys.stderr)
+            else:
+                print(f"Updated and moved for review: {destination}", file=sys.stderr)
         else:
             if raw_single_line:
                 if raw_frontmatter_prefix:
@@ -1264,11 +1763,28 @@ def main(argv: list[str] | None = None) -> int:
                     f"--write will add missing reference sections: {headings}.",
                     file=sys.stderr,
                 )
+            if destination == path:
+                print(
+                    "Successful --write will keep the note in its existing AI Processed "
+                    "review folder.",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"Successful --write will move the updated note to: {destination}",
+                    file=sys.stderr,
+                )
             print("Preview only; no file was changed.", file=sys.stderr)
         return 0
     except SummaryError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
+    finally:
+        if snapshot is not None:
+            try:
+                os.close(snapshot.parent_fd)
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":
