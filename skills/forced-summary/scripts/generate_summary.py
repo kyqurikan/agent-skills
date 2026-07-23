@@ -34,6 +34,7 @@ MAX_NOTE_BYTES = 10 * 1024 * 1024
 MAX_TRANSCRIPT_CHARS = 600_000
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_SUMMARY_CHARS = 30_000
+MAX_FILENAME_BYTES = 255
 REQUEST_TIMEOUT_SECONDS = 180
 CANONICAL_SECTION_TITLES = (
     "Executive Summary",
@@ -1128,16 +1129,41 @@ def atomic_write(path: Path, new_text: str, original_mode: int) -> None:
                 pass
 
 
-def processed_destination(path: Path) -> Path:
+def _prefixed_filename(path: Path, filename_prefix: str) -> str:
+    if not filename_prefix:
+        return path.name
+    if any(
+        character in filename_prefix
+        for character in ("/", "\\", "\0", "\n", "\r")
+    ) or any(
+        ord(character) < 0x20 or ord(character) == 0x7F
+        for character in filename_prefix
+    ):
+        raise SummaryError(
+            "The filename prefix cannot contain path separators or control characters."
+        )
+    filename = filename_prefix + path.name
+    if len(filename.encode("utf-8")) > MAX_FILENAME_BYTES:
+        raise SummaryError(
+            f"The prefixed filename exceeds the {MAX_FILENAME_BYTES}-byte safety limit."
+        )
+    return filename
+
+
+def processed_destination(path: Path, filename_prefix: str = "") -> Path:
     """Return the adjacent human-review destination for a successful write."""
     if path.parent.name.casefold() == PROCESSED_DIRECTORY_NAME.casefold():
         return path
-    return path.parent / PROCESSED_DIRECTORY_NAME / path.name
+    return (
+        path.parent
+        / PROCESSED_DIRECTORY_NAME
+        / _prefixed_filename(path, filename_prefix)
+    )
 
 
-def preflight_processed_destination(path: Path) -> Path:
+def preflight_processed_destination(path: Path, filename_prefix: str = "") -> Path:
     """Validate the review destination without creating or changing anything."""
-    destination = processed_destination(path)
+    destination = processed_destination(path, filename_prefix)
     if destination == path:
         return destination
 
@@ -1322,6 +1348,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Allow replacement of a non-placeholder Executive Summary; requires --write",
     )
+    parser.add_argument(
+        "--filename-prefix",
+        default="",
+        help=(
+            "Prepend this exact text to the filename when moving it to AI Processed; "
+            "an empty value preserves the original filename"
+        ),
+    )
     return parser
 
 
@@ -1332,7 +1366,7 @@ def main(argv: list[str] | None = None) -> int:
             raise SummaryError("--replace-existing requires --write.")
         path = resolve_note(args.note)
         original, text, original_mode = read_note(path)
-        destination = preflight_processed_destination(path)
+        destination = preflight_processed_destination(path, args.filename_prefix)
         raw_parts = _raw_single_line_parts(text)
         raw_single_line = raw_parts is not None
         raw_frontmatter_prefix = raw_parts[0] if raw_parts is not None else ""

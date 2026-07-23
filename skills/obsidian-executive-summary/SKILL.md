@@ -36,6 +36,7 @@ links, and file and directory `fsync`.
 - Remove model-supplied backtick fence lines and neutralize any remaining triple-backtick runs before rendering. Wrap the complete cleaned model response exactly once inside the local Executive Summary template.
 - Never infer email context or calendar invitees from the transcription. Add deterministic placeholders when those sections are absent, and preserve existing supporting-section content.
 - Preserve unrelated H2 sections in existing structured notes. Enforce canonical order among the four reference sections without deleting or moving unrelated content.
+- Before the first approved move in a request, ask the user exactly once what they want prepended to every filename. Reuse the answer for every selected note in that request. If the answer is blank, preserve filenames and continue normally. Apply a nonblank prefix exactly as entered only to notes being moved into `AI Processed/`; update a note already directly inside `AI Processed/` in place without renaming it.
 - After a successful approved write, move the updated note into an adjacent `AI Processed/` subfolder for human review. Never overwrite an existing review destination; keep an explicitly selected note already directly inside `AI Processed/` in place.
 - Let the script quarantine and verify the original source before deleting it. Never replace the protected move with an ad hoc copy-and-delete operation.
 - During folder or batch discovery, prune every `AI Processed/` directory. Reprocess a review-stage note only when the user explicitly selects it, and obtain separate approval before replacing a populated Executive Summary.
@@ -54,15 +55,24 @@ links, and file and directory `fsync`.
    The preview reports the planned review destination. A same-named destination collision stops before credential loading or model generation. For a heading-free single-line note, including one after safe YAML frontmatter, it reports that `## Transcription` and its wrapper will be added during an approved write. For an existing unwrapped Transcription section, it reports that the wrapper will be normalized.
 
 4. Review the preview for unsupported claims, missing decisions, incorrect owners, and sensitive detail.
-5. Write only after the user explicitly approves the selected note or reviewed batch. This preserves eligible YAML frontmatter and trailing blank padding, creates missing canonical sections, guarantees the exact Transcription wrapper, and moves the completed note into the adjacent review folder:
+5. After all required write and replacement approvals are in hand, but before the first move, ask once: “What would you like me to prepend to all filenames before I move them to AI Processed? Leave it blank to keep filenames unchanged.” Use that one answer for every note in the current request and do not ask again for each file.
+6. Write only after the user answers the filename-prefix question. This preserves eligible YAML frontmatter and trailing blank padding, creates missing canonical sections, guarantees the exact Transcription wrapper, and moves the completed note into the adjacent review folder. If the answer was blank, omit `--filename-prefix` and run normally:
 
    ```bash
    python3 scripts/generate_summary.py "/absolute/path/to/note.md" --write
    ```
 
-6. If a non-placeholder Executive Summary already exists, obtain separate approval before using `--replace-existing`. Require explicit selection for in-place reprocessing of a note directly inside `AI Processed/`.
+   If the answer was nonblank, pass the exact same value as one shell-quoted literal argument on every selected note:
 
-Preview remains read-only. A cleanly successful write creates `AI Processed/`
+   ```bash
+   python3 scripts/generate_summary.py "/absolute/path/to/note.md" --write --filename-prefix "Customer - "
+   ```
+
+7. If a non-placeholder Executive Summary already exists, obtain separate approval before using `--replace-existing`. Require explicit selection for in-place reprocessing of a note directly inside `AI Processed/`.
+
+Preview remains read-only and reports the planned unprefixed review destination.
+The write command validates the final prefixed destination before credential
+loading or model generation. A cleanly successful write creates `AI Processed/`
 when needed, reports the final human-review path, and removes the verified
 source quarantine. A note already directly inside `AI Processed/` is updated
 in place. Process batch items independently. On a partial-durability or cleanup

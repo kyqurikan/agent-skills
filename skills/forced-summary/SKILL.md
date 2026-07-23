@@ -21,6 +21,7 @@ no personal vault path, credential, or private note content.
 - Do not preview, fact-check, compare against the transcription, or otherwise review the endpoint response for grounding, attribution, owners, certainty, omissions, sensitive detail, or content quality.
 - Do not reject, correct, rewrite, qualify, or regenerate endpoint text for semantic reasons.
 - Preserve endpoint claims and wording through the renderer except for mandatory delimiter and category-label normalization and security rejection of active Markdown or remote content.
+- Before the first write or move in a request, ask exactly once what the user wants prepended to every filename. Reuse the answer for every selected note in that request. If the answer is blank, preserve filenames and continue normally. Apply a nonblank prefix exactly as entered only to notes being moved into `AI Processed/`; update a note already directly inside `AI Processed/` in place without renaming it.
 - Treat `AI Processed/` as the human-review boundary. Always disclose that the forced summaries were not fact-checked.
 - Retain every structural, path, credential, collision, concurrency, model-output, and transcription-preservation safeguard below. Forced mode bypasses semantic review only.
 
@@ -63,21 +64,28 @@ Summary fence.
 ## Direct write workflow
 
 1. Confirm the selected note or bounded batch from the explicit force-summary request and established context.
-2. Discover candidates using the scope rules, prune `AI Processed/`, and check every adjacent review destination for collisions before endpoint generation.
-3. Run each selected note directly in write mode; do not require a semantic preview:
+2. Before discovering final destinations or starting the first write, ask once: “What would you like me to prepend to all filenames before I move them to AI Processed? Leave it blank to keep filenames unchanged.” Use that one answer for every note in the current request and do not ask again for each file.
+3. Discover candidates using the scope rules, prune `AI Processed/`, and check every final prefixed review destination for collisions before endpoint generation.
+4. Run each selected note directly in write mode; do not require a semantic preview. If the answer was blank, omit `--filename-prefix` and run normally:
 
    ```bash
    python3 scripts/generate_summary.py "/absolute/path/to/note.md" --write
    ```
 
-4. Use `--replace-existing` only when the user explicitly approves replacement of that selected populated Executive Summary:
+   If the answer was nonblank, pass the exact same value as one shell-quoted literal argument on every selected note:
+
+   ```bash
+   python3 scripts/generate_summary.py "/absolute/path/to/note.md" --write --filename-prefix "Customer - "
+   ```
+
+5. Use `--replace-existing` only when the user explicitly approves replacement of that selected populated Executive Summary:
 
    ```bash
    python3 scripts/generate_summary.py "/absolute/path/to/note.md" --write --replace-existing
    ```
 
-5. Let the script render and structurally validate the edit, publish it exclusively to the adjacent `AI Processed/` directory, and remove the unchanged source. A note already directly in `AI Processed/` is updated in place and never moved into a nested review folder.
-6. Validate only operational results: destination existence, source removal when moved, canonical H2 order, separate fenced Summary and Transcription blocks, and exact transcription preservation. Do not inspect or score summary semantics.
+6. Let the script render and structurally validate the edit, publish it exclusively to the adjacent `AI Processed/` directory, and remove the unchanged source. A note already directly in `AI Processed/` is updated in place and never moved into a nested review folder.
+7. Validate only operational results: destination existence, source removal when moved, canonical H2 order, separate fenced Summary and Transcription blocks, and exact transcription preservation. Do not inspect or score summary semantics.
 
 ## Completion report
 

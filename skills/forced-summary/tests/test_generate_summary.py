@@ -537,6 +537,86 @@ class ExecutiveSummaryTests(unittest.TestCase):
             self.assertIn(raw, destination.read_text(encoding="utf-8"))
             self.assertIn("Updated and moved for review", errors.getvalue())
 
+    def test_write_prepends_selected_filename_prefix_and_blank_is_unchanged(self):
+        raw = "Speaker 1: Prefix this processed filename."
+        summary = "Opening.\n\n1. **Decision:**\n   - Proceed."
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            root = Path(temporary) / "Allowed Root"
+            note = root / "Nested Notes" / "2026-07-15-prefix.md"
+            note.parent.mkdir(parents=True)
+            note.write_text(raw, encoding="utf-8")
+
+            self.assertEqual(
+                module.processed_destination(note),
+                note.parent / module.PROCESSED_DIRECTORY_NAME / note.name,
+            )
+            self.assertEqual(
+                module.processed_destination(note, "Customer - "),
+                note.parent
+                / module.PROCESSED_DIRECTORY_NAME
+                / f"Customer - {note.name}",
+            )
+
+            with mock.patch.object(module, "ALLOWED_ROOTS", (root,)):
+                with mock.patch.object(module, "load_api_key", return_value="test-secret"):
+                    with mock.patch.object(
+                        module,
+                        "request_summary",
+                        return_value=summary,
+                    ):
+                        errors = io.StringIO()
+                        with redirect_stderr(errors):
+                            self.assertEqual(
+                                module.main(
+                                    [
+                                        str(note),
+                                        "--write",
+                                        "--filename-prefix",
+                                        "Customer - ",
+                                    ]
+                                ),
+                                0,
+                            )
+
+            destination = (
+                note.parent
+                / module.PROCESSED_DIRECTORY_NAME
+                / f"Customer - {note.name}"
+            )
+            self.assertFalse(note.exists())
+            self.assertTrue(destination.exists())
+            self.assertIn(str(destination), errors.getvalue())
+
+    def test_invalid_filename_prefix_fails_before_model_processing(self):
+        raw = "Speaker 1: Do not process an unsafe destination."
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            root = Path(temporary) / "Allowed Root"
+            note = root / "Nested Notes" / "2026-07-15-prefix.md"
+            note.parent.mkdir(parents=True)
+            note.write_text(raw, encoding="utf-8")
+
+            with mock.patch.object(module, "ALLOWED_ROOTS", (root,)):
+                with mock.patch.object(module, "load_api_key") as key_mock:
+                    with mock.patch.object(module, "request_summary") as request_mock:
+                        errors = io.StringIO()
+                        with redirect_stderr(errors):
+                            self.assertEqual(
+                                module.main(
+                                    [
+                                        str(note),
+                                        "--write",
+                                        "--filename-prefix",
+                                        "../unsafe",
+                                    ]
+                                ),
+                                2,
+                            )
+
+            key_mock.assert_not_called()
+            request_mock.assert_not_called()
+            self.assertTrue(note.exists())
+            self.assertIn("path separators", errors.getvalue())
+
     def test_existing_summary_requires_replace_and_can_be_replaced(self):
         text = (
             "## Executive Summary\n"
