@@ -20,6 +20,10 @@ Expert UX/UI design assistant based on the "Refactoring UI" philosophy.
 Unified expert for Project Management (Scrum/Agile) and GitHub Flow enforcement.
 - **Key Features:** Track orchestration, backlog hygiene, GitHub Issue synchronization, branch management, and enforcing strict PR-first workflows (Issue <-> Track <-> Branch).
 
+### 🏷️ [FY27 SR Tagging](./skills/fy27-sr-tagging)
+Match FY27 sales notes to an SR mapping table using exact customer and owner tags, then preview or insert the corresponding SR Number and OppID tags.
+- **Key Features:** YAML and inline-tag support, exact-pair corroboration, conflict detection, atomic writes, and idempotent verification.
+
 ### 🎙️ [MacWhisper](./skills/macwhisper)
 Read-only access to [MacWhisper](https://goodsnooze.gumroad.com/l/macwhisper) transcription sessions from its local SQLite database. Zero configuration for a standard MacWhisper install.
 - **Key Features:** List unprocessed recordings, fetch diarized transcripts with hallucination filtering, keyword search, processed-session state tracking, and UTC time windows for calendar enrichment.

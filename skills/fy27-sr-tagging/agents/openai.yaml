@@ -1,0 +1,4 @@
+interface:
+  display_name: "FY27 SR Tagging"
+  short_description: "Match SR records and tag FY27 sales notes"
+  default_prompt: "Use $fy27-sr-tagging to preview and apply SR Number and OppID tags to matching Sales Team FY27 notes."
