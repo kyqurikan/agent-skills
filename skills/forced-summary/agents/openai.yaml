@@ -1,0 +1,4 @@
+interface:
+  display_name: "Forced Summary"
+  short_description: "Insert summaries and technologies without grounding review"
+  default_prompt: "Use $forced-summary to write the local endpoint summary and Oracle/non-Oracle technology lists into eligible Obsidian notes without semantic review, then stage successful notes in AI Processed."

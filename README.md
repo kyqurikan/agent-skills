@@ -28,6 +28,14 @@ Match FY27 sales notes to an SR mapping table using exact customer and owner tag
 Read-only access to [MacWhisper](https://goodsnooze.gumroad.com/l/macwhisper) transcription sessions from its local SQLite database. Zero configuration for a standard MacWhisper install.
 - **Key Features:** List unprocessed recordings, fetch diarized transcripts with hallucination filtering, keyword search, processed-session state tracking, and UTC time windows for calendar enrichment.
 
+### 📝 [Obsidian Executive Summary](./skills/obsidian-executive-summary)
+Generate a structured four-section sales note from an approved Obsidian transcription using a fixed local OpenAI-compatible model endpoint, then stage successful writes for human review.
+- **Key Features:** Preview-first semantic review, configurable path allowlists, POSIX/macOS collision-safe staging into adjacent `AI Processed/` folders, source quarantine and verification, explicit recovery-path reporting, exact transcript preservation, strict credential permissions, untrusted-transcript handling, and synthetic tests.
+
+### ⚠️ [Forced Summary](./skills/forced-summary)
+Force-write the pinned local endpoint's executive-summary output into eligible Obsidian notes, then move successful notes to `AI Processed/` for human review.
+- **Key Features:** Explicit opt-in, direct write-and-move batches, destination-collision preflight, atomic structural safeguards, exact transcript preservation, and deterministic supporting sections. **Warning:** Unlike Obsidian Executive Summary, this skill intentionally skips semantic grounding and content-quality review; all outputs require human review.
+
 ## Usage
 
 These skills are designed to be dropped into your agent's skills directory.
