@@ -1,4 +1,4 @@
 interface:
   display_name: "Obsidian Executive Summary"
-  short_description: "Preview summaries and stage notes for review"
-  default_prompt: "Use $obsidian-executive-summary to preview and review a selected sales transcript before staging an approved write in AI Processed."
+  short_description: "Preview summaries, technology lists, and stage review"
+  default_prompt: "Use $obsidian-executive-summary to preview and review a selected sales transcript and its Oracle/non-Oracle technology lists before staging an approved write in AI Processed."

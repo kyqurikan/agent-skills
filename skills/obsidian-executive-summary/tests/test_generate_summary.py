@@ -34,9 +34,13 @@ class MockHandler(BaseHTTPRequestHandler):
                 {
                     "message": {
                         "content": (
-                            "The meeting focused on a customer decision.\n\n"
-                            "1. **Decision:**\n   - Proceed with validation.\n\n"
-                            "The next owner was not stated."
+                            '{"executive_summary":"The meeting focused on a customer '
+                            'decision.\\n\\n1. **Decision:**\\n   - Proceed with validation.'
+                            '\\n\\nThe next owner was not stated.",'
+                            '"oracle_and_oracle_cloud_technologies":['
+                            '{"technology":"Oracle Database","status":"customer_used"},'
+                            '{"technology":"OCI","status":"oracle_pitched"}],'
+                            '"non_oracle_technologies":["AWS RDS"]}'
                         )
                     }
                 }
@@ -208,6 +212,14 @@ class ExecutiveSummaryTests(unittest.TestCase):
     def test_raw_single_line_preview_is_read_only_and_write_adds_heading(self):
         raw = "  Speaker 1: Preserve this exact single-line transcript.\t"
         summary = "Opening.\n\n1. **Decision:**\n   - Proceed.\n\nClosing."
+        generated = module.GeneratedContent(
+            summary,
+            (
+                module.OracleTechnology("Oracle Database", "customer_used"),
+                module.OracleTechnology("OCI Object Storage", "oracle_pitched"),
+            ),
+            ("AWS RDS",),
+        )
         with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
             root = Path(temporary) / "Allowed Root"
             note = root / "Nested Notes" / "2026-07-09-test.md"
@@ -220,7 +232,7 @@ class ExecutiveSummaryTests(unittest.TestCase):
                     with mock.patch.object(
                         module,
                         "request_summary",
-                        return_value=summary,
+                        return_value=generated,
                     ) as request_mock:
                         preview_out = io.StringIO()
                         preview_err = io.StringIO()
@@ -228,6 +240,12 @@ class ExecutiveSummaryTests(unittest.TestCase):
                             self.assertEqual(module.main([str(note)]), 0)
                         self.assertEqual(note.read_bytes(), original)
                         self.assertIn("--write will add ## Transcription", preview_err.getvalue())
+                        preview = preview_out.getvalue()
+                        self.assertIn("## Relevant Oracle and Customer Technologies Discussed", preview)
+                        self.assertIn("**Oracle and Oracle Cloud Technologies**", preview)
+                        self.assertIn("**Non-Oracle Technologies**", preview)
+                        self.assertIn("- Oracle Database — Customer in use", preview)
+                        self.assertIn("- AWS RDS — Customer in use", preview)
 
                         write_out = io.StringIO()
                         write_err = io.StringIO()
@@ -252,6 +270,13 @@ class ExecutiveSummaryTests(unittest.TestCase):
                 "Place Notes from chat and Relevant Email information & notes here.",
                 updated,
             )
+            self.assertIn("## Relevant Oracle and Customer Technologies Discussed", updated)
+            self.assertIn("**Oracle and Oracle Cloud Technologies**", updated)
+            self.assertIn("**Non-Oracle Technologies**", updated)
+            self.assertIn("- Oracle Database — Customer in use", updated)
+            self.assertIn("- OCI Object Storage — Oracle team pitched", updated)
+            self.assertIn("- AWS RDS — Customer in use", updated)
+            self.assertNotIn("- None identified in the transcription.", updated)
             self.assertIn("Pull Invitees from calendar invite here.", updated)
             self.assertTrue(
                 updated.endswith(module.render_transcription_section(raw, "\n"))
@@ -311,6 +336,8 @@ class ExecutiveSummaryTests(unittest.TestCase):
             "<iframe src='https://example.invalid'></iframe>",
             "{{template-embed}}",
             "Remote resource: https://example.invalid/data",
+            "Remote resource: ftp://example.invalid/data",
+            "Unsafe control character: \x00",
         )
         for unsafe in unsafe_values:
             with self.subTest(unsafe=unsafe):
@@ -1290,6 +1317,275 @@ class ExecutiveSummaryTests(unittest.TestCase):
         self.assertIn(safe_payload, rendered)
         self.assertTrue(module.transcription_is_canonically_fenced(rendered))
 
+    def test_five_section_contract_and_exact_technology_lists(self):
+        expected_titles = [
+            "Executive Summary",
+            "Relevant Oracle and Customer Technologies Discussed",
+            "Relevant Emails and Notes",
+            "Meeting Invitees",
+            "Transcription",
+        ]
+        self.assertEqual(list(module.CANONICAL_SECTION_TITLES), expected_titles)
+        self.assertEqual(
+            list(module.SUPPORTING_SECTION_TITLES),
+            ["Relevant Emails and Notes", "Meeting Invitees"],
+        )
+        content = module.GeneratedContent(
+            "Opening.\n\n1. **Decision:**\n   - Proceed.\n\nClosing.",
+            (
+                module.OracleTechnology("Oracle Database", "customer_used"),
+                module.OracleTechnology("OCI", "oracle_pitched"),
+                module.OracleTechnology("Oracle Integration Cloud", "both"),
+            ),
+            ("AWS RDS", "MongoDB"),
+        )
+        technologies = module.render_technology_section(content, "\n")
+        self.assertEqual(
+            [heading.title for heading in module._structural_h2_headings(technologies)],
+            ["Relevant Oracle and Customer Technologies Discussed"],
+        )
+        self.assertEqual(
+            technologies.count("**Oracle and Oracle Cloud Technologies**"),
+            1,
+        )
+        self.assertEqual(technologies.count("**Non-Oracle Technologies**"), 1)
+        self.assertIn("- Oracle Database — Customer in use", technologies)
+        self.assertIn("- OCI — Oracle team pitched", technologies)
+        self.assertIn(
+            "- Oracle Integration Cloud — Customer in use; Oracle team pitched",
+            technologies,
+        )
+        self.assertIn("- AWS RDS — Customer in use", technologies)
+        module.validate_technology_section(technologies)
+
+        empty = module.render_technology_section(
+            module.GeneratedContent("Summary.", (), ()),
+            "\n",
+        )
+        self.assertEqual(empty.count("- None identified in the transcription."), 2)
+        module.validate_technology_section(empty)
+
+    def test_generated_content_json_is_strict_and_locally_rendered(self):
+        payload = json.dumps(
+            {
+                "executive_summary": (
+                    "Opening.\n\n1. **Decision:**\n   - Proceed.\n\nClosing."
+                ),
+                "oracle_and_oracle_cloud_technologies": [
+                    {"technology": "Oracle Database", "status": "customer_used"},
+                    {"technology": "OCI", "status": "oracle_pitched"},
+                ],
+                "non_oracle_technologies": ["AWS"],
+            }
+        )
+        parsed = module._parse_generated_content(f"```json\n{payload}\n```")
+        self.assertEqual(parsed.executive_summary.splitlines()[0], "Opening.")
+        self.assertEqual(parsed.oracle_technologies[0].technology, "Oracle Database")
+        self.assertEqual(parsed.non_oracle_technologies, ("AWS",))
+
+        invalid_payloads = (
+            '{"executive_summary":"x","executive_summary":"y",'
+            '"oracle_and_oracle_cloud_technologies":[],"non_oracle_technologies":[]}',
+            json.dumps(
+                {
+                    "executive_summary": "Summary.",
+                    "oracle_and_oracle_cloud_technologies": [
+                        {"technology": "OCI", "status": "maybe"}
+                    ],
+                    "non_oracle_technologies": [],
+                }
+            ),
+            json.dumps(
+                {
+                    "executive_summary": "Summary.",
+                    "oracle_and_oracle_cloud_technologies": [
+                        {"technology": "OCI```", "status": "oracle_pitched"}
+                    ],
+                    "non_oracle_technologies": [],
+                }
+            ),
+            json.dumps(
+                {
+                    "executive_summary": "Summary.",
+                    "oracle_and_oracle_cloud_technologies": [
+                        {"technology": "OCI", "status": "oracle_pitched"}
+                    ],
+                    "non_oracle_technologies": ["oci"],
+                }
+            ),
+            json.dumps(
+                {
+                    "executive_summary": "Summary.",
+                    "oracle_and_oracle_cloud_technologies": [],
+                    "non_oracle_technologies": [],
+                    "extra": True,
+                }
+            ),
+        )
+        for invalid in invalid_payloads:
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(module.SummaryError):
+                    module._parse_generated_content(invalid)
+
+    def test_generated_content_rejects_control_characters_in_technology_names(self):
+        for control in ("\t", "\n", "\r", "\x00", "\x7f"):
+            unsafe_name = f"OCI{control}- Injected technology"
+            payloads = (
+                {
+                    "executive_summary": "Summary.",
+                    "oracle_and_oracle_cloud_technologies": [
+                        {"technology": unsafe_name, "status": "customer_used"}
+                    ],
+                    "non_oracle_technologies": [],
+                },
+                {
+                    "executive_summary": "Summary.",
+                    "oracle_and_oracle_cloud_technologies": [],
+                    "non_oracle_technologies": [unsafe_name],
+                },
+            )
+            for payload in payloads:
+                with self.subTest(control=repr(control), payload=payload):
+                    with self.assertRaises(module.SummaryError):
+                        module._parse_generated_content(json.dumps(payload))
+
+    def test_existing_technology_content_is_preserved_and_placeholder_is_replaced(self):
+        existing_technology = (
+            "## Relevant Oracle and Customer Technologies Discussed\n"
+            "```\n"
+            "**Oracle and Oracle Cloud Technologies**\n"
+            "- Oracle Database — Customer in use\n\n"
+            "**Non-Oracle Technologies**\n"
+            "- AWS — Customer in use\n"
+            "```"
+        )
+        text = (
+            "## Executive Summary\nPending.\n\n"
+            f"{existing_technology}\n\n"
+            "## Transcription\nTranscript body."
+        )
+        replacement = module.render_technology_section(
+            module.GeneratedContent(
+                "Summary.",
+                (module.OracleTechnology("OCI", "oracle_pitched"),),
+                ("Azure",),
+            ),
+            "\n",
+        )
+        updated = module.apply_template_sections(
+            text,
+            module.render_section("Summary.", "8-24-26", "\n"),
+            replacement,
+        )
+        self.assertIn(existing_technology, updated)
+        self.assertNotIn("- Azure — Customer in use", updated)
+
+        placeholder = (
+            "## Executive Summary\nPending.\n\n"
+            "## Relevant Oracle and Customer Technologies Discussed\n"
+            "```\n"
+            "Create two bulleted lists. One list will be Oracle and Oracle Cloud "
+            "Technologies. The other list will contain technologies that aren't "
+            "Oracle technologies.\n"
+            "```\n\n"
+            "## Transcription\nTranscript body."
+        )
+        replaced = module.apply_template_sections(
+            placeholder,
+            module.render_section("Summary.", "8-24-26", "\n"),
+            replacement,
+        )
+        self.assertIn("- OCI — Oracle team pitched", replaced)
+        self.assertIn("- Azure — Customer in use", replaced)
+        self.assertNotIn("Create two bulleted lists", replaced)
+
+    def test_main_preserves_valid_populated_technology_section_byte_for_byte(self):
+        existing_technology = (
+            "## Relevant Oracle and Customer Technologies Discussed\n"
+            "```\n"
+            "**Oracle and Oracle Cloud Technologies**\n"
+            "- Oracle Database — Customer in use\n\n"
+            "**Non-Oracle Technologies**\n"
+            "- AWS — Customer in use\n"
+            "```"
+        )
+        original_text = (
+            "## Executive Summary\n```\n```\n\n"
+            f"{existing_technology}\n\n"
+            "## Transcription\n```\nTranscript body.\n```"
+        )
+        generated = module.GeneratedContent(
+            "Opening.\n\n1. **Decision:**\n   - Proceed.\n\nClosing.",
+            (module.OracleTechnology("OCI", "oracle_pitched"),),
+            ("Azure",),
+        )
+        original_bounds = module._section_bounds(
+            original_text,
+            "Relevant Oracle and Customer Technologies Discussed",
+        )
+        self.assertIsNotNone(original_bounds)
+        original_heading, _, original_end = original_bounds
+        original_section = original_text[original_heading.start() : original_end]
+
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            root = Path(temporary) / "Allowed Root"
+            note = root / "2026-08-24-existing-technologies.md"
+            note.parent.mkdir(parents=True)
+            note.write_text(original_text, encoding="utf-8")
+            with mock.patch.object(module, "ALLOWED_ROOTS", (root,)):
+                with mock.patch.object(module, "load_api_key", return_value="test-secret"):
+                    with mock.patch.object(module, "request_summary", return_value=generated):
+                        preview_out = io.StringIO()
+                        with redirect_stdout(preview_out), redirect_stderr(io.StringIO()):
+                            self.assertEqual(module.main([str(note)]), 0)
+                        self.assertEqual(note.read_text(encoding="utf-8"), original_text)
+                        self.assertIn(existing_technology, preview_out.getvalue())
+                        self.assertNotIn("- Azure — Customer in use", preview_out.getvalue())
+                        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                            self.assertEqual(module.main([str(note), "--write"]), 0)
+
+            destination = note.parent / module.PROCESSED_DIRECTORY_NAME / note.name
+            updated = destination.read_text(encoding="utf-8")
+            updated_bounds = module._section_bounds(
+                updated,
+                "Relevant Oracle and Customer Technologies Discussed",
+            )
+            self.assertIsNotNone(updated_bounds)
+            updated_heading, _, updated_end = updated_bounds
+            self.assertEqual(
+                updated[updated_heading.start() : updated_end],
+                original_section,
+            )
+            self.assertNotIn("- Azure — Customer in use", updated)
+
+    def test_malformed_populated_technology_fails_before_credentials_or_model(self):
+        malformed = (
+            "## Executive Summary\n```\n```\n\n"
+            "## Relevant Oracle and Customer Technologies Discussed\n"
+            "```\n"
+            "**Oracle and Oracle Cloud Technologies**\n"
+            "- Oracle Database — Customer in use\n\n"
+            "**Unexpected Third List**\n"
+            "- AWS — Customer in use\n"
+            "```\n\n"
+            "## Transcription\n```\nTranscript body.\n```"
+        )
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            root = Path(temporary) / "Allowed Root"
+            note = root / "malformed-technologies.md"
+            note.parent.mkdir(parents=True)
+            note.write_text(malformed, encoding="utf-8")
+            original = note.read_bytes()
+            with mock.patch.object(module, "ALLOWED_ROOTS", (root,)):
+                with mock.patch.object(module, "load_api_key") as key_mock:
+                    with mock.patch.object(module, "request_summary") as request_mock:
+                        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                            self.assertEqual(module.main([str(note)]), 2)
+            key_mock.assert_not_called()
+            request_mock.assert_not_called()
+            self.assertEqual(note.read_bytes(), original)
+            self.assertFalse((note.parent / module.PROCESSED_DIRECTORY_NAME).exists())
+
     def test_local_chat_request_uses_fixed_model_prompt_and_untrusted_marker(self):
         server = ThreadingHTTPServer(("127.0.0.1", 0), MockHandler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -1305,9 +1601,26 @@ class ExecutiveSummaryTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
-        self.assertIn("customer decision", summary)
+        self.assertIn("customer decision", summary.executive_summary)
+        self.assertEqual(
+            summary.oracle_technologies,
+            (
+                module.OracleTechnology("Oracle Database", "customer_used"),
+                module.OracleTechnology("OCI", "oracle_pitched"),
+            ),
+        )
+        self.assertEqual(summary.non_oracle_technologies, ("AWS RDS",))
         captured = server.captured
         self.assertEqual(captured["model"], "cohere.command-a-03-2025")
+        system_prompt = captured["messages"][0]["content"]
+        for key in (
+            "executive_summary",
+            "oracle_and_oracle_cloud_technologies",
+            "non_oracle_technologies",
+        ):
+            self.assertIn(key, system_prompt)
+        for status in ("customer_used", "oracle_pitched", "both"):
+            self.assertIn(status, system_prompt)
         self.assertTrue(captured["messages"][1]["content"].startswith("generate an executive summary"))
         self.assertIn("TRANSCRIPTION_START", captured["messages"][1]["content"])
 

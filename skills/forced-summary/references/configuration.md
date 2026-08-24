@@ -33,7 +33,10 @@ A successful `--write` publishes the updated note at
 `<source-directory>/AI Processed/<source-name>` and then removes the unchanged
 source. The script creates the adjacent review directory when needed. It never
 overwrites an existing destination. A directly selected note whose parent is
-already named `AI Processed` is updated in place.
+already named `AI Processed` is updated in place. Replacing a populated
+Executive Summary requires explicit approval and `--replace-existing`. A valid
+populated technology section is preserved byte-for-byte; a missing or
+recognized placeholder technology section is generated during the write.
 
 ## Stored credential alternative
 
@@ -53,6 +56,15 @@ The endpoint and model are intentionally fixed:
 - Endpoint: `http://127.0.0.1:8088/v1/chat/completions`
 - Model: `cohere.command-a-03-2025`
 - User prompt prefix: `generate an executive summary`
+
+The endpoint response must be one bounded JSON object with exactly
+`executive_summary`, `oracle_and_oracle_cloud_technologies`, and
+`non_oracle_technologies`. Oracle technology items contain exactly a
+`technology` name and one of the statuses `customer_used`, `oracle_pitched`,
+or `both`; non-Oracle items are technology-name strings. The script validates
+that schema and renders the Markdown headings, fences, labels, status wording,
+and bullet syntax locally. Forced mode accepts the classifications after these
+structural checks without factual-grounding review.
 
 The selected transcription and bearer credential are sent to whichever local
 process owns port `8088`. Verify that process before summarizing sensitive

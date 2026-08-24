@@ -1,6 +1,6 @@
 ---
 name: forced-summary
-description: Force-insert a local OpenAI-compatible Cohere Command A endpoint's executive-summary output into eligible Obsidian Markdown notes without agent-level factual grounding, attribution, owner, certainty, sensitivity, or content-quality review, then move successful writes into an adjacent AI Processed folder for human review. Use only when the user explicitly says "force summary skill", "forced summary skill", invokes `$forced-summary`, or clearly requests insertion of the custom endpoint response without grounding checks.
+description: Force-insert a local OpenAI-compatible Cohere Command A endpoint's executive-summary and categorized Oracle/non-Oracle technology output into eligible Obsidian Markdown notes without agent-level factual grounding, attribution, owner, certainty, sensitivity, technology-classification, or content-quality review, then move successful writes into an adjacent AI Processed folder for human review. Use only when the user explicitly says "force summary skill", "forced summary skill", invokes `$forced-summary`, or clearly requests insertion of the custom endpoint response without grounding checks.
 ---
 
 # Forced Summary
@@ -18,11 +18,11 @@ no personal vault path, credential, or private note content.
 ## Force only semantic acceptance
 
 - Treat explicit invocation as approval to generate and write the selected note or clearly identified batch with `--write`.
-- Do not preview, fact-check, compare against the transcription, or otherwise review the endpoint response for grounding, attribution, owners, certainty, omissions, sensitive detail, or content quality.
+- Do not preview, fact-check, compare against the transcription, or otherwise review the endpoint response for grounding, attribution, owners, certainty, omissions, sensitive detail, technology classification, or content quality.
 - Do not reject, correct, rewrite, qualify, or regenerate endpoint text for semantic reasons.
-- Preserve endpoint claims and wording through the renderer except for mandatory delimiter and category-label normalization and security rejection of active Markdown or remote content.
+- Preserve endpoint claims, wording, and technology classifications through the renderer except for mandatory schema, delimiter, and category-label normalization and security rejection of active Markdown or remote content.
 - Before the first write or move in a request, ask exactly once what the user wants prepended to every filename. Reuse the answer for every selected note in that request. If the answer is blank, preserve filenames and continue normally. Apply a nonblank prefix exactly as entered only to notes being moved into `AI Processed/`; update a note already directly inside `AI Processed/` in place without renaming it.
-- Treat `AI Processed/` as the human-review boundary. Always disclose that the forced summaries were not fact-checked.
+- Treat `AI Processed/` as the human-review boundary. Always disclose that the forced summaries and technology classifications were not fact-checked.
 - Retain every structural, path, credential, collision, concurrency, model-output, and transcription-preservation safeguard below. Forced mode bypasses semantic review only.
 
 ## Scope and batch discovery
@@ -52,12 +52,17 @@ Read `references/security.md` before changing or bypassing any validation.
 Create or preserve these H2 sections in order:
 
 1. `## Executive Summary`
-2. `## Relevant Emails and Notes`
-3. `## Meeting Invitees`
-4. `## Transcription`
+2. `## Relevant Oracle and Customer Technologies Discussed`
+3. `## Relevant Emails and Notes`
+4. `## Meeting Invitees`
+5. `## Transcription`
 
-Generate only the Executive Summary body. Create missing supporting sections
-from deterministic assets and preserve populated supporting content. Keep
+Generate model-derived content only for the Executive Summary and technology
+section. Render the technology section locally with exactly two labeled
+bulleted lists: `Oracle and Oracle Cloud Technologies` and `Non-Oracle
+Technologies`; mark each Oracle technology as customer-used, Oracle-pitched, or
+both. Create missing email and invitee sections from deterministic assets and
+preserve populated supporting and valid populated technology content. Keep
 model-generated headings literal inside the locally controlled Executive
 Summary fence.
 
@@ -84,8 +89,8 @@ Summary fence.
    python3 scripts/generate_summary.py "/absolute/path/to/note.md" --write --replace-existing
    ```
 
-6. Let the script render and structurally validate the edit, publish it exclusively to the adjacent `AI Processed/` directory, and remove the unchanged source. A note already directly in `AI Processed/` is updated in place and never moved into a nested review folder.
-7. Validate only operational results: destination existence, source removal when moved, canonical H2 order, separate fenced Summary and Transcription blocks, and exact transcription preservation. Do not inspect or score summary semantics.
+6. Let the script structurally validate the bounded JSON result, locally render the summary and two technology lists, validate the edit, publish it exclusively to the adjacent `AI Processed/` directory, and remove the unchanged source. A note already directly in `AI Processed/` is updated in place and never moved into a nested review folder.
+7. Validate only operational results: destination existence, source removal when moved, canonical H2 order, exact technology-list labels, separate fenced Summary, technology, and Transcription blocks, and exact transcription preservation. Do not inspect or score summary or technology semantics.
 
 ## Completion report
 
@@ -93,4 +98,4 @@ Report discovered, completed, failed, and remaining counts; each review
 destination; structural validation status; and every collision or script
 error. Include this notice verbatim:
 
-> Forced endpoint summaries were inserted without factual-grounding review and require human review.
+> Forced endpoint summaries and technology classifications were inserted without factual-grounding review and require human review.

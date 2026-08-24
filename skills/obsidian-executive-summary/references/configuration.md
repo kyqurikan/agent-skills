@@ -49,7 +49,9 @@ whose parent is already named `AI Processed` is updated in place.
 If a same-named review file already exists, processing stops before credential
 loading or model generation and leaves both files unchanged. Replacing a
 populated Executive Summary requires explicit approval and
-`--replace-existing` in addition to `--write`.
+`--replace-existing` in addition to `--write`. A valid populated technology
+section is preserved byte-for-byte; a missing or recognized placeholder
+technology section is generated during the write.
 
 After publication begins, a failed durability or cleanup step may leave the
 preserved content at a review, quarantine, temporary, or original path. The
@@ -84,6 +86,14 @@ The endpoint and model are intentionally fixed:
 - Endpoint: `http://127.0.0.1:8088/v1/chat/completions`
 - Model: `cohere.command-a-03-2025`
 - User prompt prefix: `generate an executive summary`
+
+The endpoint response must be one bounded JSON object with exactly
+`executive_summary`, `oracle_and_oracle_cloud_technologies`, and
+`non_oracle_technologies`. Oracle technology items contain exactly a
+`technology` name and one of the statuses `customer_used`, `oracle_pitched`,
+or `both`; non-Oracle items are technology-name strings. The script validates
+that schema and renders the Markdown headings, fences, labels, status wording,
+and bullet syntax locally.
 
 The selected transcription and bearer credential are sent to whichever local
 process owns port `8088`. Verify that process before summarizing sensitive
